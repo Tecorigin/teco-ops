@@ -1,0 +1,167 @@
+syntax = "proto2";
+
+package testpt;
+
+enum Device {
+  CPU           = 1;
+  GPU           = 2;
+}
+
+enum EvaluationCriterion {
+  DIFF1   = 1;
+  DIFF2   = 2;
+  DIFF3   = 3;
+  DIFF3_MAX = 4;
+  DIFF4   = 5;
+  MAPE    = 6;
+  MAE     = 7;
+  DIFF3_MEAN = 8;
+  MSE_RELA = 9;
+}
+
+message Thresholds {
+  repeated double evaluation_threshold      = 1;
+  repeated double evaluation_threshold_imag = 2;
+}
+
+// OpDataType_t;
+enum DataType {
+  DTYPE_FLOAT           = 0;
+  DTYPE_HALF            = 1;
+  DTYPE_INT8            = 2;
+  DTYPE_INT16           = 3;
+  DTYPE_INT32           = 4;
+  DTYPE_INT64           = 5;
+  DTYPE_UINT8           = 6;
+  DTYPE_BOOL            = 7;
+  DTYPE_UINT16          = 8;
+  DTYPE_UINT32          = 9;
+  DTYPE_UINT64          = 10;
+  DTYPE_DOUBLE          = 11;
+  DTYPE_BFLOAT16        = 12;
+  DTYPE_COMPLEX_HALF    = 13;
+  DTYPE_COMPLEX_FLOAT   = 14;
+  DTYPE_INVALID         = 15;
+}
+
+// OpTensorLayout_t;
+enum TensorLayout {
+  LAYOUT_NCHW  = 0;
+  LAYOUT_NHWC  = 1;
+  LAYOUT_HWCN  = 2;
+  LAYOUT_NDHWC = 3;
+  LAYOUT_ARRAY = 4;
+  LAYOUT_NCDHW = 5;
+  LAYOUT_TNC   = 6;
+  LAYOUT_NTC   = 7;
+  LAYOUT_NC    = 8;
+  LAYOUT_NLC   = 9;
+  LAYOUT_NWHC   = 10;
+  LAYOUT_CHWN   = 11;
+  LAYOUT_CDHWN = 12;
+}
+
+enum TensorType {
+  TENSOR = 0;
+  FILTER = 1;
+  SEQDATA = 2;
+  VALID = 3;
+}
+
+message Shape {
+  repeated int32 dims       = 1;
+  repeated int32 dim_stride = 2;
+}
+
+message Value {
+  repeated float value_f                   = 1;
+  repeated int32 value_i                   = 2;
+  repeated int64 value_l                   = 3;
+  repeated string value_h                  = 4;
+  repeated string value_bf                 = 5;
+}
+
+
+// OpTensorDescriptor_t
+message Tensor {
+  required string id                       = 1;
+  required Shape shape                     = 2;
+  required TensorLayout layout             = 3 [default = LAYOUT_ARRAY];
+  required DataType dtype                  = 4 [default = DTYPE_FLOAT];
+  required TensorType ttype                = 14 [default = TENSOR];
+  optional bool reused                     = 5 [default = false];
+  optional int32  inplace                  = 17 [default = -1];
+
+  // data
+  optional Value prev_value                     = 6;
+  optional Value value                     = 7;
+
+  // else data source
+  optional string prev_path                     = 10;
+  optional string path                     = 15;
+
+  // random data = delete
+  optional RandomData random_data          = 11;
+  // dynamic threshold
+  optional Thresholds thresholds           = 12;
+  optional int32 threshold_use             = 13;
+
+  optional DiffParam diff_param            = 16;
+}
+
+// random data
+enum RandomDistribution {
+  UNIFORM  = 1;
+  GAUSSIAN = 2;
+  SAMPLE   = 3;
+  BINOMIAL = 4;
+  UNIQUE   = 5;
+}
+
+message RandomData {
+  optional int32 seed                      = 1;
+  // only for uniform and unique
+  optional float lower_bound               = 2 [default = -1.0];
+  optional float upper_bound               = 3 [default = 1.0];
+  optional float lower_bound_double        = 4 [default = -1.0];
+  optional float upper_bound_double        = 5 [default = 1.0];
+
+  // only for gaussian
+  optional float mu                        = 6 [default = 0.0];
+  optional float sigma                     = 7 [default = 1.0];
+  optional double mu_double                = 8 [default = 0.0];
+  optional double sigma_double             = 9 [default = 1.0];
+
+  optional RandomDistribution distribution = 10 [default = UNIFORM];
+  optional bool convert_dtype              = 11 [default = false];  // convert float to int
+
+  // dropout
+  optional float zero_dropout              = 12 [default = 0.0];
+  optional float nan_dropout               = 13 [default = 0.0];
+  optional bool positive                   = 14 [default = false];
+  optional bool negative                   = 15 [default = false];
+  optional float inf_dropout               = 16 [default = 0.0];
+}
+
+// remove this param later
+message TestParam {
+  repeated EvaluationCriterion error_func = 1;
+  repeated double error_threshold         = 2;
+  repeated double ratio_threshold         = 7;
+  repeated double golden_threshold        = 8;
+  repeated double calc_eps                = 9;
+  
+  repeated double error_threshold_imag    = 3;
+  optional double latency                 = 4;    //   latency
+  optional double efficiency              = 5;    //   efficiency
+  optional Device baseline_device         = 6;
+}
+
+message DiffParam {
+  optional double diff1                   = 1;
+  optional double diff2                   = 2;
+  optional double diff3_max               = 3;
+  optional double diff4                   = 4;
+  optional double mape                    = 5;
+  optional double mae                     = 6;
+}

@@ -1,0 +1,8 @@
+syntax = "proto2";
+
+package testpt;
+
+import "tensor.proto";
+
+message TecokernelParam {
+}

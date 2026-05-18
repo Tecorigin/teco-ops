@@ -1,0 +1,39 @@
+#!/bin/bash
+#set -e
+#set -x
+
+if [[ "$(which clang-format)" == "" ]]; then
+  echo "Please install clang-format on your OS!"
+fi
+
+usage () {
+  echo "USAGE: format2google [options] <file>"
+  echo "       format2google [options] <dir>"
+  echo
+  echo "OPTIONS:"
+  echo "      -h, --help   Print usage"
+  echo
+}
+
+if [[ $# -eq 1 ]]; then
+  case "${1}" in
+      -h | --help)
+          usage
+          exit 0
+          ;;
+      * )
+          input=${1}
+          ;;
+  esac
+else
+  usage
+  exit 1
+fi
+
+file_list=$(find ${input} -name "*.c" -or -name "*.cpp" -or -name "*.swcu" -or -name "*.h" -or -name "*.hpp")
+
+for file in ${file_list}; do
+  echo "clang-format formating ${file} ..."
+  clang-format -style=file -i ${file}
+#   clang-format -style="{BasedOnStyle: google, PointerAlignment: Right, SortIncludes: Never, ColumnLimit: 100}" -i ${file}
+done

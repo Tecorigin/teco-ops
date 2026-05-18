@@ -1,0 +1,2 @@
+./test_case/add_tensor/case_0.prototxt
+./test_case/embedding_forward/case_0.prototxt

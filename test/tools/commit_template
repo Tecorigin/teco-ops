@@ -1,0 +1,31 @@
+[<type>](<scope>): <subject>
+
+<body>
+
+<footer>
+
+# 一个规范的commit message示例如下:
+# [feat](ual): add feature1 and feature2 for ual.
+#
+# 1.add feature1: XXX.
+# 2.add feature2: XXX.
+#
+# #1001
+#
+# type: 描述此次修改的类型，必须为以下几种。
+#     feat: 新特性
+#     fix: 问题修复
+#     perf: 性能提升
+#     refactor: 代码重构
+#     ci: 持续集成修改
+#     tool: 工具修改
+#     docs: 文档修改
+#     test: 测试修改
+#
+# scope: 描述此次修改影响的范围，必须为blas, dnn, rand, ual, common或者op。
+#
+# subject: 一句话简短的描述本次修改的内容。
+#
+# body: 更为详细的描述本次修改的内容。
+#
+# footer: 可以写禅道号。

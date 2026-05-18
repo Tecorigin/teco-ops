@@ -1,0 +1,68 @@
+op_name: "scatter_out"
+input {
+  id: "input"
+  shape: {
+    dims: 4
+    dims: 8
+    dims: 16
+    dims: 32
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data: {
+    seed: 15
+    upper_bound: 0
+    lower_bound: 0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "index"
+  shape: {
+    dims: 4
+    dims: 8
+    dims: 16
+    dims: 32
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT64
+  ttype: TENSOR
+  random_data: {
+    seed: 15
+    upper_bound: 0
+    lower_bound: 0
+    distribution: UNIFORM
+  }
+}
+input {
+  id: "output"
+  shape: {
+    dims: 4
+    dims: 8
+    dims: 16
+    dims: 3200
+  }
+  reused : true
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data: {
+    seed: 15
+    upper_bound: 2
+    lower_bound: 2
+    distribution: UNIFORM
+  }
+}
+
+
+tecoal_param: {
+scatter_out_param: {
+  target_dim: 3
+  alpha: 5.0
+  scatter_out_reduce_mode: 0
+  scatter_out_input_type: 1
+  algo: 0
+}
+}

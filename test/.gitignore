@@ -1,0 +1,10 @@
+thirdparty/
+build/
+build_cuda/
+src/suite/case_list.cpp
+src/suite/op_register.cpp
+src/suite/op_register.h
+zoo/teco/*/test_case/*/
+*pyc
+*pyo
+__pycache__

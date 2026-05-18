@@ -1,0 +1,71 @@
+op_name: "embedding_forward"
+input {
+  id: "indices"
+  shape: {
+    dims: 10
+    dims: 1024
+    dims: 1
+    dims: 1
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_INT32
+  ttype: SEQDATA
+  random_data: {
+    seed: 15
+    upper_bound: 1000
+    lower_bound: 0.0
+    distribution: UNIFORM
+  }
+}
+
+
+input {
+  id: "weights"
+  shape: {
+    dims: 2048
+    dims: 1
+    dims: 1
+    dims: 768
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_FLOAT
+  ttype: SEQDATA
+  random_data: {
+    seed: 60
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "out"
+  shape: {
+    dims: 10
+    dims: 1024
+    dims: 1
+    dims: 768
+  }
+  reused: true
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_FLOAT
+  ttype: SEQDATA
+  random_data: {
+    seed: 60
+    upper_bound: 2.0
+    lower_bound: 0.0
+    distribution: UNIFORM
+  }
+}
+
+dnn_param: {
+embedding_forward_param: {
+  alpha: 1.0
+  beta: 0.0
+  emb_desc_param{
+    padding_idx: -1
+    scale_grad_mode: EMBEDDING_SCALE_GRAD_FRED
+    array_type: ARRAY_DENSE
+  }
+}
+}

@@ -1,0 +1,32 @@
+#! /bin/sh
+# Commit message validation hook
+# This hook validates commit messages for Teco-Ops project
+
+if test "$#" != 1 ; then
+  echo "$0 requires an argument."
+  exit 1
+fi
+
+if test ! -f "$1" ; then
+  echo "file does not exist: $1"
+  exit 1
+fi
+
+if test ! -s "$1" ; then
+  echo "file is empty: $1"
+  exit 1
+fi
+
+# Read the commit message
+commit_msg=$(cat "$1")
+
+# Check for basic format: [type](algo<num>): subject
+# This is a simple validation, not strict enforcement
+if ! echo "$commit_msg" | grep -qE '^\[.+\]\(.+\):.+'; then
+  echo "Warning: Commit message does not match expected format:"
+  echo "  [type](algo<num>): subject"
+  echo "Example: [feat](algo0): add new operator"
+  echo "You can bypass this check with: git commit -n 'message'"
+fi
+
+exit 0

@@ -1,0 +1,78 @@
+{
+	"default": [{
+		"dtype": "float",
+		"mode": "default",
+		"diff1": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": false
+		},
+		"diff2": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": false
+		},
+		"diff3": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": false
+		},
+		"diff3_max": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": true
+		},
+		"diff3_mean": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": true
+		},
+		"diff4": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": false
+		},
+		"mape": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": true
+		},
+		"mae": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 1e-3,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": true
+		},
+		"mse_rela": {
+			"golden_threshold": 2,
+			"golden_eps": 1e-6,
+			"max_error": 0.025,
+			"error_threshold": 1e-4,
+			"ratio_threshold": 1e-5,
+			"enable": true
+		}
+	}]
+}

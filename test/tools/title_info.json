@@ -1,0 +1,5 @@
+{
+    "1":"arg_max/half",
+    "2":"activation_backward/silu/half",
+    "3":"conv_forward/rs_not_1"
+}

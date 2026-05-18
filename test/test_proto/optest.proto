@@ -1,0 +1,37 @@
+syntax = "proto2";
+package testpt;
+
+//option optest_package = "testpt";
+//option optest_name = "optest.proto";
+
+import "tensor.proto";
+import "tecokernel.proto";
+
+message Node {
+  optional string valid                                         = 1 [default = "True"];
+  optional string pattern                                       = 2 [default = "random"];
+  optional Device device                                        = 3 [default = CPU];
+
+  required string op_name                                       = 4 [default = "unknown"];    // op_name
+  repeated Tensor input                                         = 5;
+  repeated Tensor output                                        = 6;
+
+  optional Tensor workspace                                     = 7;
+  optional Tensor reservespace                                  = 8;
+
+  // evaluation
+  optional TestParam test_param                                 = 9;    // remove this param later = delete
+  optional double latency                                       = 10;    // latency
+  optional double io_efficiency                                 = 11;    // efficiency
+  optional double efficiency                                    = 12;    // efficiency
+  repeated EvaluationCriterion evaluation_criterion             = 13;
+  repeated double evaluation_threshold                          = 14;
+  repeated double evaluation_threshold_imag                     = 15;
+  optional double theory_io_size                                = 16;
+  optional double theory_compute_ops                            = 17;
+
+  extensions 3000 to 4000;
+
+  // API
+  optional TecokernelParam tecokernel_param                         = 4002;
+}

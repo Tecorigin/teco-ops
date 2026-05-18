@@ -1,0 +1,41 @@
+#! /bin/bash
+
+if [[ $# -eq 1 ]]; then
+  filenames=$(git diff --name-only ${1})
+else
+  filenames=$(git diff --diff-filter=A --diff-filter=C --diff-filter=M \
+    --diff-filter=R --diff-filter=T --cached --name-only)
+fi
+
+
+ret=0
+
+if [[ "$(which cpplint)" == "" ]]; then
+  echo "Please pip install cpplint(version>=1.5.5)!"
+  exit -1
+fi
+
+echo "-- [pre-commit] Using cpplint to check patch by .git/hooks/pre-commit..."
+for i in ${filenames} ; do
+  cpplint --exclude=test_proto \
+          --exclude=src/common/half.hpp \
+          --exclude=src/nlohmann \
+          --exclude=zoo/tecoal/convert.cpp --exclude=zoo/tecoal/convert.h $i 2>&1 \
+    | grep -v "Ignoring" \
+    | grep -v "Total errors" \
+    | grep -v "Done processing"
+
+  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    ret=1
+  fi
+done
+
+if [[ ${ret} != 0 ]]; then
+  echo "-- [pre-commit] cpplint FAILED: Please fix cpplint errors or use \
+tools/format2google to format the patch."
+  exit ${ret}
+else
+  echo "-- [pre-commit] cpplint PASSED."
+fi
+
+exit 0

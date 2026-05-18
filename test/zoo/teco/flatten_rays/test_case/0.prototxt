@@ -1,0 +1,28 @@
+op_name: "flatten_rays"
+input {
+  id: "rays"
+  shape {
+    dims: 3
+    dims: 2
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  prev_value {
+    value_i: 0
+    value_i: 3
+    value_i: 3
+    value_i: 2
+    value_i: 5
+    value_i: 4
+  }
+  ttype: TENSOR
+}
+output {
+  id: "res"
+  shape {
+    dims: 9
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+}
