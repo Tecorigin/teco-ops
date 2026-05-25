@@ -1,54 +1,39 @@
 # 算子开发指南
 
-本文档介绍如何在 Teco-Ops 项目中添加新算子、编写测试用例、运行测试以及提交代码的完整流程。
+本文档介绍如何在 Teco-Ops 项目中添加新算子、编写测试用例及运行测试的完整流程。
 
 ## 开发前准备
 
 推荐在开始算子开发前，先阅读以下基础手册：
 
+- [SDAA C 零基础入门](http://docs.tecorigin.com/release/sdaac_beginner_guide/#a85ae5a993af55d6ae2cf60feda4f55f)：面向零基础学习者的入门教程。
 - [SDAA C 编程指南](http://docs.tecorigin.com/release/sdaac/)：介绍 SDAA C 编程语言、语言规范、函数接口、数学函数、程序编译、程序调试及性能调优等内容。
 - [性能优化手册-SDAAC 篇](http://docs.tecorigin.com/release/sddac_perf_opt/)：介绍程序并行、函数接口、数学函数、程序编译过程中的性能优化内容。
 - [性能优化手册-算子篇](http://docs.tecorigin.com/release/op_perf_opt/)：介绍经典的计算与访存优化办法，包括向量指令、指令流水线、矩阵乘法加速单元、双缓冲、广播优化等。
 
+## 常用概念
+
+本项目使用以下核心概念，理解这些概念有助于更好地理解代码架构和算子实现：
+
+| 概念 | 说明 |
+|------|------|
+| **ops** | 算子（Operator）的缩写，指执行特定计算逻辑的功能单元，如矩阵乘法、卷积、激活函数等 |
+| **ual** | 统一算子库（Unified Accelerated Libraries）的缩写，是算子的核心实现层，负责分支选择和设备端计算 |
+| **algo** | 算法（Algorithm）的缩写，用于指定同一算子的不同实现方式，通过 `algo` 参数可以在运行时选择最优的计算路径 |
+| **args** | 参数（Arguments）的缩写，用于封装算子执行所需的配置信息，如计算参数和分支派发参数 |
+| **handle** | 句柄（Handle）的缩写，作为算子执行的上下文，管理设备信息（如 `spe_num`、`stream` 等） |
+| **tensor** | 张量，表示多维数据数组，是算子的输入输出数据格式 |
+| **descriptor** | 描述符，用于描述张量的属性（shape、dtype、layout 等）或算子的配置信息 |
+| **workspace** | 工作空间，算子执行时申请的临时存储区域，用于存放中间计算结果 |
+| **kernel** | 核函数，设备端（Device）执行的计算函数，通常使用 `__global__` 属性标记 |
+| **branch/dispatch** | 分支派发，根据输入参数（如数据类型、算法类型）选择对应 kernel 实现的过程 |
+| **SPM** | 片上共享内存（Shared Private Memory），一种高速片上存储，容量有限（约 235KB），需谨慎申请 |
+
 ## 代码风格
 
-- 编码统一使用 [Google C++ 风格](https://zh-google-styleguide.readthedocs.io/en/latest/google-cpp-styleguide/contents.html)
-- 所有新增文件需参考已有文件，在文件头添加 BSD License
-- SPM 内存申请时，不要超过 235KB
-- 算子目录名和文件名必须保持一致（如 `my_op`），作为自动化构建脚本的索引
+详见 [算子提交规范 - 代码风格](PR.md#代码风格)。
 
 > **注意：** 建议同时创建对应算子的设计文档，参考 [算子设计文档模板](op_docs/doc_template.md) 和已有算子文档（如 [flatten_rays 设计文档](op_docs/flatten_rays.md)）进行编写。
-
-### 代码格式化
-
-贡献者可以使用 `tools/format2google` 脚本将代码规范化为 Google C++ 风格：
-
-```bash
-# 格式化单个文件
-./tools/format2google path/to/file.cpp
-
-# 格式化整个目录
-./tools/format2google path/to/directory
-```
-
-### 代码风格检查
-
-项目使用 cpplint 进行代码风格检查。在 `source env.sh` 后，git hooks 会自动安装：
-
-```bash
-# 安装依赖
-pip install cpplint
-
-# 首次使用需要 source env.sh 来安装 git hooks
-source env.sh
-
-# 提交时自动检查
-git add <files>
-git commit -m "message"
-
-# 跳过检查（不推荐）
-git commit -n -m "message"
-```
 
 ## 分层架构设计
 
@@ -84,6 +69,20 @@ tecoopsMyOp(handle, ...)     # Interface 层：用户 API
 
 ## 添加新算子
 
+按照以下步骤在项目中添加新算子，实现 interface 层和 ual 层的完整代码：
+
+在 `teco/` 目录下按 interface + ual 分层结构添加算子文件。包括：
+
+1. 在 `teco/interface/include/tecoops.h` 中声明算子 C API
+2. 在 `teco/interface/ops/` 中实现接口（参数组装 + `RUN_OP` 分发）
+3. 在 `teco/ual/args/` 中定义参数结构体
+4. 在 `teco/ual/ops/` 中实现 Op 类（分支分发）
+5. 在 `teco/ual/kernel/` 中实现设备端 kernel（`.scpp`）
+6. 添加 Proto 参数定义
+7. 编写测试代码
+8. 添加测试用例
+9. 构建并执行测试
+
 ### 1. 在 Interface 层声明 API
 
 在 `teco/interface/include/tecoops.h` 中添加算子的 C API 声明：
@@ -98,7 +97,7 @@ tecoopsStatus_t tecoopsMyOp(
 
 ### 2. 在 Interface 层实现接口
 
-在 `teco/interface/ops/` 下创建 `my_op.cpp`，实现参数组装和 `RUN_OP` 分发：
+在 `teco/interface/ops/` 下创建接口实现文件，完成参数组装和分发：
 
 ```cpp
 #include "interface/include/tecoops.h"
@@ -142,7 +141,7 @@ tecoopsStatus_t tecoopsMyOp(
 
 ### 3. 在 UAL 层定义参数结构体
 
-在 `teco/ual/args/` 下创建 `my_op_args.h`：
+定义算子的运行参数和分支选择参数：
 
 ```cpp
 #ifndef TECO_UAL_ARGS_MY_OP_ARGS_H_
@@ -178,7 +177,7 @@ struct MyOpPatchArgs {
 
 ### 4. 在 UAL 层实现 Op 类（分支分发）
 
-在 `teco/ual/ops/my_op/` 下创建以下文件：
+实现 Op 类，通过 find() 方法选择数据类型/算法分支：
 
 ```
 teco/ual/ops/my_op/
@@ -270,7 +269,7 @@ int findMyOpBranch(const MyOpPatchArgs *arg) {
 
 ### 5. 在 UAL 层实现 Kernel（设备端计算）
 
-在 `teco/ual/kernel/my_op/` 下创建以下文件：
+实现设备端核函数，完成实际计算逻辑：
 
 ```
 teco/ual/kernel/my_op/
@@ -312,16 +311,15 @@ void tecoKernelMyOpFloat(MyOpArgs arg) {
 }
 ```
 
+**SPM 内存限制：** SPM 内存申请时，不能超过 235KB，推荐使用仓库封装的 `rt_spm_malloc()` 与 `rt_spm_free()` 等接口（接口封装占用 128B，上限为 240512B），可以在超量申请时报错提醒。
+
 ### 6. 添加 Proto 参数定义
 
 如果算子需要额外参数（除输入输出张量外），需在 proto 中定义：
 
 #### 6.1 创建算子参数 proto 文件
 
-```
-test/test_proto/tecokernel/
-└── my_op.proto
-```
+定义算子特有的参数结构：
 
 示例（`test/test_proto/tecokernel/my_op.proto`）：
 
@@ -337,7 +335,7 @@ message MyOpParam {
 
 #### 6.2 注册到 tecokernel.proto
 
-编辑 `test/test_proto/tecokernel.proto`，添加算子参数：
+将新算子参数注册到统一的 proto 文件中：
 
 ```proto
 syntax = "proto2";
@@ -353,7 +351,7 @@ message TecokernelParam {
 
 ### 7. 编写测试代码
 
-在 `test/zoo/teco/` 下创建算子测试目录：
+继承 TecoExecutor 类，实现算子的测试逻辑：
 
 ```
 test/zoo/teco/
@@ -362,7 +360,9 @@ test/zoo/teco/
     └── my_op.cpp
 ```
 
-#### 7.1 头文件（`test/zoo/teco/my_op/my_op.h`）
+#### 7.1 头文件
+
+定义测试类，继承 TecoExecutor：
 
 ```cpp
 #ifndef MY_OP_EXECUTOR_H
@@ -399,7 +399,9 @@ private:
 #endif
 ```
 
-#### 7.2 实现文件（`test/zoo/teco/my_op/my_op.cpp`）
+#### 7.2 实现文件
+
+实现测试类的各个方法：
 
 ```cpp
 #include "zoo/teco/my_op/my_op.h"
@@ -471,7 +473,7 @@ void MyOpExecutor::destroy() {}
 
 ### 8. 创建测试用例（prototxt）
 
-在算子测试目录下创建 `test_case/` 目录，添加 prototxt 文件：
+编写 prototxt 格式的测试用例：
 
 ```
 test/zoo/teco/my_op/
@@ -520,11 +522,15 @@ tecokernel_param {
 
 ### 9. 构建并运行测试
 
+构建算子库及测试，并执行测试。
+
 ```bash
-cd test
-source env.sh
+# 构建所有算子（TECO 架构）
+bash build.sh --build teco
 
 # 构建所有算子测试
+cd test
+source env.sh
 sh build.sh --arch teco
 
 # 运行测试
