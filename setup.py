@@ -73,11 +73,17 @@ if with_torch == "ON":
             raise RuntimeError("CMake build failed: " + result.stderr)
         print("libteco_ops.so built successfully!")
 
+        teco_ops_lib = os.path.join(teco_lib_dir, "libteco_ops.so")
+        teco_ops_dest = os.path.join(current_path, "api", "tecoops", "libteco_ops.so")
+        shutil.copy2(teco_ops_lib, teco_ops_dest)
+        print(f"Copied libteco_ops.so to api/tecoops/")
+
         # Common link args for both extensions
+        # Use $ORIGIN so that _torch_ext.so finds libteco_ops.so in its own directory at runtime
         common_link_args = [
             "-L" + teco_lib_dir,
             "-lteco_ops",
-            "-Wl,-rpath," + teco_lib_dir,
+            "-Wl,-rpath,$$ORIGIN",
             "-L" + torch_lib_dir,
             "-Wl,-rpath," + torch_lib_dir,
         ]
@@ -108,4 +114,7 @@ setup(
     cmdclass=cmdclass,
     package_dir={"": "api"},
     packages=['tecoops'],
+    package_data={
+        'tecoops': ['*.so'],
+    },
 )
