@@ -1,0 +1,7 @@
+syntax = "proto2";
+package testpt;
+
+message MemsetParam{
+    optional int32 value                                 = 1;
+    optional int64 size                                  = 2;
+}

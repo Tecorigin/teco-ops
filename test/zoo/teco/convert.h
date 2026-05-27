@@ -26,6 +26,8 @@
 #include "zoo/tecozoo.h"
 namespace optest {
 namespace convert {
+tecoopsDataType_t toTecoopsDataType(testpt::DataType dtype);
+tecoopsTensorFormat_t toTecoopsFormat(testpt::TensorLayout layout);
 }  // namespace convert
 
 }  // namespace optest

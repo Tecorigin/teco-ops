@@ -24,28 +24,36 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#ifndef TECOOPS_UAL_OPS_MEMSET_FIND_MEMSET_H_
+#define TECOOPS_UAL_OPS_MEMSET_FIND_MEMSET_H_
 
-#include "interface/include/tecoops.h"
-#include "ual/com/def.h"
-#include "ual/com/status.h"
+// #include "ual/ops/ops_com/algorithm_finder.h"
+#include "ual/args/memset_args.h"
+// #include "ual/common/configure.h"
 
 namespace tecoops {
+namespace ual {
+namespace ops {
 
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
+using tecoops::ual::args::MemsetArgs;
 
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
+// typedef struct MemsetIdentify {
+//     using V1 = struct V1;
+// } MemsetIdentify;
 
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
+// using AlgoMemset = AlgoInstance<void, MemsetArgs>;
+// AlgoMemset findMemsetAlgo(const MemsetArgs *arg);
 
-    static const char* toStatusStr(ual::common::Status status);
+// template <>
+// struct AlgoDispatcher<void, MemsetArgs, MemsetArgs, MemsetIdentify::V1> {
+//     // algo find
+//     static AlgoMemset algoFinder(const MemsetArgs *args) {
+//         return findMemsetAlgo(args);
+//     }
+// };
+int findMemsetBranch(const MemsetArgs *arg);
 
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
-};
-
+}  // namespace ops
+}  // namespace ual
 }  // namespace tecoops
-
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#endif  // TECOOPS_UAL_OPS_MEMSET_FIND_MEMSET_H_

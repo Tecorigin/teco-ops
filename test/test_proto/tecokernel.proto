@@ -3,6 +3,10 @@ syntax = "proto2";
 package testpt;
 
 import "tensor.proto";
+import "tecokernel/memset.proto";
+import "tecokernel/reduce_variance.proto";
 
 message TecokernelParam {
+    optional MemsetParam memset_param                            = 1;
+    optional ReduceVarianceParam reduce_variance_param           = 2;
 }

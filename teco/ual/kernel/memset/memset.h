@@ -24,18 +24,13 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_MARCO_H_
-#define TECOOPS_INTERFACE_COMMON_MARCO_H_
+#ifndef TECO_UAL_KERNEL_MEMSET_MEMSET_H_
+#define TECO_UAL_KERNEL_MEMSET_MEMSET_H_
 
-#include "interface/common/check.h"
+#include "ual/args/memset_args.h"
 
-#define RUN_OP(op_type, args, patch_args, handle) \
-    do {                                          \
-        op_type impl{};                           \
-        auto status = impl.find(&patch_args);     \
-        checkUalStatusInTecoops(status);          \
-        status = impl.run(&args, handle->stream); \
-        checkUalStatusInTecoops(status);          \
-    } while (0);
+using tecoops::ual::args::MemsetArgs;
 
-#endif  // TECOOPS_INTERFACE_COMMON_MARCO_H_
+__global__ void teco_slave_memset_4B_align(MemsetArgs mem_arg);
+
+#endif  // TECO_UAL_KERNEL_MEMSET_MEMSET_H_

@@ -24,28 +24,41 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
-
-#include "interface/include/tecoops.h"
-#include "ual/com/def.h"
-#include "ual/com/status.h"
+// #include "ual/ops/ops_com/discriptor_finder.h"
+#include "ual/ops/reduce_variance/find_reduce_variance.h"
+#include "ual/kernel/reduce_variance/reduce_variance.h"
+#include "ual/com/log.h"
 
 namespace tecoops {
+namespace ual {
+namespace ops {
 
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
+using tecoops::ual::args::ReduceVariancePatchArgs;
 
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
 
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
+int findReduceVarianceBranch(const ReduceVariancePatchArgs *args) {
+    auto data_type = args->data_type;
+    auto axis = args->axis;
+    auto dims = args->rvargs->dims;
+    auto dimA = args->dimA;
+    int algo = 0;
+    if (data_type == UALDataType::UAL_DTYPE_FLOAT) {
+        if (axis == dims - 1) {
+            // "teco_slave_reduce_variance_axis_right_float",
+            algo = 0;
+        } else if (axis > 0 && axis < dims - 1) {
+            // "teco_slave_reduce_variance_axis_middle_float"
+            algo = 1;
+        } else {
+            // "teco_slave_reduce_variance_axis_left_float"
+            algo = 2;
+        }
+    } else {
+        ERROR("not support this datatype \n");
+    }
+    return algo;
+}
 
-    static const char* toStatusStr(ual::common::Status status);
-
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
-};
-
+}  // namespace ops
+}  // namespace ual
 }  // namespace tecoops
-
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_

@@ -24,28 +24,39 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#ifndef TECO_UAL_ARGS_REDUCE_VARIANCE_ARGS_H_
+#define TECO_UAL_ARGS_REDUCE_VARIANCE_ARGS_H_
 
-#include "interface/include/tecoops.h"
 #include "ual/com/def.h"
-#include "ual/com/status.h"
 
+using tecoops::ual::common::UALDataType;
 namespace tecoops {
+namespace ual {
+namespace args {
 
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
+typedef struct ReduceVarianceArgs {
+    // TBR int core_num;
+    int spe_num;
+    int dims;
+    int correction;
+    unsigned data_num;
+    unsigned matrix_num;
+    unsigned matrix_row;
+    unsigned matrix_col;
+    const void *x;
+    void *y;
+} ReduceVarianceArgs;
 
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
+typedef struct ReduceVariancePatchArgs {
+    ReduceVarianceArgs *rvargs;
+    UALDataType data_type;
+    int axis;
+    int *dimA;
+} ReduceVariancePatchArgs;
 
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
 
-    static const char* toStatusStr(ual::common::Status status);
-
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
-};
-
+}  // namespace args
+}  // namespace ual
 }  // namespace tecoops
 
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#endif  // TECO_UAL_ARGS_REDUCE_VARIANCE_ARGS_H_

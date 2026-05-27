@@ -1,0 +1,7 @@
+syntax = "proto2";
+package testpt;
+
+message ReduceVarianceParam{
+    optional int32 axis                                 = 1;
+    optional int32 correction                           = 2;
+}

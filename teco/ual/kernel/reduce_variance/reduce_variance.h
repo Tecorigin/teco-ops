@@ -24,28 +24,15 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#ifndef TECO_UAL_KERNEL_REDUCE_VARIANCE_REDUCE_VARIANCE_H_
+#define TECO_UAL_KERNEL_REDUCE_VARIANCE_REDUCE_VARIANCE_H_
 
-#include "interface/include/tecoops.h"
-#include "ual/com/def.h"
-#include "ual/com/status.h"
+#include "ual/args/reduce_variance_args.h"
 
-namespace tecoops {
+using tecoops::ual::args::ReduceVarianceArgs;
+// support the float data type
+__global__ void teco_slave_reduce_variance_axis_right_float(ReduceVarianceArgs arg);
+__global__ void teco_slave_reduce_variance_axis_middle_float(ReduceVarianceArgs arg);
+__global__ void teco_slave_reduce_variance_axis_left_float(ReduceVarianceArgs arg);
 
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
-
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
-
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
-
-    static const char* toStatusStr(ual::common::Status status);
-
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
-};
-
-}  // namespace tecoops
-
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#endif  // TECO_UAL_KERNEL_REDUCE_VARIANCE_REDUCE_VARIANCE_H_

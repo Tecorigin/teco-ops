@@ -24,28 +24,20 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#ifndef INTERFACE_INCLUDE_BUILTIN_TYPE_H_
+#define INTERFACE_INCLUDE_BUILTIN_TYPE_H_
 
+#include "interface/common/tensor.h"
 #include "interface/include/tecoops.h"
-#include "ual/com/def.h"
-#include "ual/com/status.h"
 
-namespace tecoops {
-
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
-
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
-
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
-
-    static const char* toStatusStr(ual::common::Status status);
-
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
+struct tecoopsContext {
+    int spa_num;
+    int spe_num;
+    int spm_size;
+    sdaaStream_t stream;
 };
 
-}  // namespace tecoops
+// The relevant structures for specific operators are defined here!
 
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_
+
+#endif  // INTERFACE_INCLUDE_BUILTIN_TYPE_H_

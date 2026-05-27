@@ -106,11 +106,30 @@ set_property(TARGET ${TARGET_NAME} PROPERTY CXX_STANDARD 14)
 
 
 if(USE_TECO)
+
     set(COM_INCLUDE /opt/tecoai/include)
     set(COM_LIB /opt/tecoai/lib64)
+    if(TECO_HOME)
+        set(TECO_INCLUDE ${TECO_HOME}/include)
+        set(TECO_LIB ${TECO_HOME}/lib)
+        set(TECO_LIB64 ${TECO_HOME}/lib64)
+    else()
+        set(TECO_INCLUDE ${PROJECT_SOURCE_DIR}/../teco/interface/include)
+        set(TECO_LIB ${PROJECT_SOURCE_DIR}/../build/teco/lib)
+        set(TECO_LIB64 ${PROJECT_SOURCE_DIR}/../build/teco/lib64)
+    endif()
+
+    include_directories(AFTER
+        ${TECO_INCLUDE}
+    )
 
     include_directories(
         ${COM_INCLUDE}
+    )
+
+    link_directories (AFTER
+        ${TECO_LIB}
+        ${TECO_LIB64}
     )
 
     link_directories(

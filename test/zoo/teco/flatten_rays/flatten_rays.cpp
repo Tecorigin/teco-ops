@@ -7,7 +7,7 @@
 
 #include "zoo/teco/flatten_rays/flatten_rays.h"
 #include "interface/include/tecoops.h"
-#include "interface/common/handle.h"
+
 
 namespace optest {
 
@@ -30,14 +30,14 @@ void FlattenRaysExecutor::paramGeneration() {
 
 void FlattenRaysExecutor::compute() {
 #ifdef USE_TECO
-    static tecoopsHandle_t handle = nullptr;
-    if (handle == nullptr) {
-        tecoopsCreate(&handle);
-    }
-    tecoopsFlattenRays(handle,
+    // static tecoopsHandle_t handle = nullptr;
+    // if (handle == nullptr) {
+    //     tecoopsCreate(&handle);
+    // }
+    checkTECOOPS(tecoopsFlattenRays(handle_,
                        static_cast<const int*>(rays), N, M,
                        static_cast<int*>(res),
-                       TECOOPS_ALGO_0);
+                       TECOOPS_ALGO_0));
 #endif
 }
 

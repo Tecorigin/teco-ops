@@ -33,6 +33,8 @@
 extern "C" {
 #endif
 
+#define TECOOPS_DIM_MAX 8
+
 typedef enum {
     TECOOPS_STATUS_SUCCESS = 0,
     TECOOPS_STATUS_NOT_INITIALIZED = 1,
@@ -42,6 +44,17 @@ typedef enum {
     TECOOPS_STATUS_INVALID_VALUE = 5,
     TECOOPS_STATUS_NOT_SUPPORTED = 6,
 } tecoopsStatus_t;
+
+typedef enum {
+    TECOOPS_TENSOR_NCHW = 0, /* row major (wStride = 1, hStride = w) */
+    TECOOPS_TENSOR_NHWC = 1, /* feature maps interleaved (cStride = 1) */
+    TECOOPS_TENSOR_CHWN =
+        2, /* each image point is vector of element of C, vector length in data type */
+    TECOOPS_TENSOR_NWHC = 3,
+    TECOOPS_TENSOR_NCDHW = 4,
+    TECOOPS_TENSOR_NDHWC = 5,
+    TECOOPS_TENSOR_CDHWN = 6,
+} tecoopsTensorFormat_t;
 
 typedef enum {
     TECOOPS_ALGO_0 = 0,
@@ -56,7 +69,22 @@ typedef enum {
     TECOOPS_ALGO_9,
 } tecoopsAlgo_t;
 
+typedef enum {
+    TECOOPS_DATA_FLOAT = 0,
+    TECOOPS_DATA_HALF = 1,
+    TECOOPS_DATA_INT8 = 2,
+    TECOOPS_DATA_INT16 = 3,
+    TECOOPS_DATA_INT32 = 4,
+    TECOOPS_DATA_INT64 = 5,
+    TECOOPS_DATA_UINT8 = 6,
+    TECOOPS_DATA_BOOL = 7,
+    TECOOPS_DATA_DOUBLE = 8,
+    TECOOPS_DATA_BFLOAT16 = 9,
+    TECOOPS_DATA_COMPLEX_FLOAT = 10,
+} tecoopsDataType_t;
+
 typedef struct tecoopsContext *tecoopsHandle_t;
+typedef struct tecoopsTensorStruct *tecoopsTensorDescriptor_t;
 
 tecoopsStatus_t tecoopsCreate(tecoopsHandle_t *handle);
 tecoopsStatus_t tecoopsDestroy(tecoopsHandle_t handle);
@@ -64,10 +92,43 @@ tecoopsStatus_t tecoopsSetStream(tecoopsHandle_t handle, sdaaStream_t stream);
 tecoopsStatus_t tecoopsGetStream(tecoopsHandle_t handle, sdaaStream_t *stream);
 const char *tecoopsGetErrorString(tecoopsStatus_t status);
 
-tecoopsStatus_t tecoopsFlattenRays(
-    tecoopsHandle_t handle,
-    const int *rays, uint32_t N, uint32_t M, int *res,
-    tecoopsAlgo_t algo);
+tecoopsStatus_t tecoopsCreateTensorDescriptor(tecoopsTensorDescriptor_t *tensorDesc);
+
+tecoopsStatus_t tecoopsSetTensor4dDescriptor(tecoopsTensorDescriptor_t tensorDesc,
+                                             tecoopsTensorFormat_t format,
+                                             tecoopsDataType_t dataType,  // image data type
+                                             int n,   // number of inputs (batch size)
+                                             int c,   // number of input feature maps
+                                             int h,   // height of input section
+                                             int w);  // width of input section
+
+tecoopsStatus_t tecoopsGetTensor4dDescriptor(const tecoopsTensorDescriptor_t tensorDesc,
+                                             tecoopsDataType_t* dataType,  // image data type
+                                             int* n,  // number of inputs (batch size)
+                                             int* c,  // number of input feature maps
+                                             int* h,  // height of input section
+                                             int* w,  // width of input section
+                                             int* nStride, int* cStride, int* hStride,
+                                             int* wStride);
+
+tecoopsStatus_t tecoopsSetTensorNdDescriptor(tecoopsTensorDescriptor_t tensorDesc,
+                                             tecoopsDataType_t dataType, int nbDims,
+                                             const int dimA[], const int strideA[]);
+
+tecoopsStatus_t tecoopsGetTensorNdDescriptor(const tecoopsTensorDescriptor_t tensorDesc,
+                                             int nbDimsRequested, tecoopsDataType_t* dataType,
+                                             int* nbDims, int dimA[], int strideA[]);
+
+tecoopsStatus_t tecoopsDestroyTensorDescriptor(tecoopsTensorDescriptor_t tensorDesc);
+
+tecoopsStatus_t tecoopsFlattenRays(tecoopsHandle_t handle, const int* rays, uint32_t N, uint32_t M,
+                                   int* res, tecoopsAlgo_t algo);
+
+tecoopsStatus_t tecoopsMemset(tecoopsHandle_t handle, void* x, const int value, size_t size);
+
+tecoopsStatus_t tecoopsReduceVariance(const tecoopsHandle_t handle, int axis, int correction,
+                                      const tecoopsTensorDescriptor_t xDesc, const void* x,
+                                      const tecoopsTensorDescriptor_t yDesc, void* y);
 
 #ifdef __cplusplus
 }

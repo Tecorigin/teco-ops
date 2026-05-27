@@ -1,0 +1,38 @@
+op_name: "reduce_variance"
+input {
+  id: "x"
+  shape: {
+    dims: 150
+    dims: 3
+    dims: 3
+    dims: 200
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data: {
+    seed: 5
+    upper_bound: 2.0
+    lower_bound: -2.0
+    distribution: UNIFORM
+  }
+}
+output {
+  id: "y"
+  shape: {
+    dims: 1
+    dims: 3
+    dims: 3
+    dims: 200
+  }
+  reused : false
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+}
+tecokernel_param: {
+  reduce_variance_param: {
+    axis: 0
+    correction:0
+  }
+}

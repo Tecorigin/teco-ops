@@ -2,7 +2,6 @@
 #include <torch_sdaa/sdaa_extension.h>
 
 #include "interface/include/tecoops.h"
-#include "interface/common/handle.h"
 
 static tecoopsHandle_t g_handle = nullptr;
 

@@ -22,5 +22,6 @@
  
 #ifndef ZOO_TECOZOO_H_  // NOLINT
 #define ZOO_TECOZOO_H_
+#include "interface/include/tecoops.h"
 // tecoal.h and tecoblas.h must front tecocustom header file
 #endif  // ZOO_TECOZOO_H_ // NOLINT

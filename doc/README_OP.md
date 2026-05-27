@@ -101,7 +101,7 @@ tecoopsStatus_t tecoopsMyOp(
 
 ```cpp
 #include "interface/include/tecoops.h"
-#include "interface/common/marco.h"
+#include "interface/common/macro.h"
 #include "interface/common/convert.h"
 #include "ual/args/my_op_args.h"
 #include "ual/ops/my_op/my_op.hpp"

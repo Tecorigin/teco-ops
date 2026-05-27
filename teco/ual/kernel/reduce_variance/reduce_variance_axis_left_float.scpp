@@ -1,0 +1,204 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/reduce_variance/reduce_variance.h"
+
+using namespace sdaa;  //NOLINT
+
+// macro definition of MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+// macro definition of MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+// caculate_variance
+__device__ static __always_inline void caculate_variance(float* x, float* mean, float* square,
+                                                         const int cur_col, const int cur_row,
+                                                         const int aligned_col, const int _row) {
+    int col_idx, row_idx;
+    floatv16 v_x1, v_x2, v_x3, v_x4;
+    floatv16 v_mean1, v_mean2, v_mean3, v_mean4;
+    floatv16 v_square1, v_square2, v_square3, v_square4;
+    float value;
+
+    // main caculation loop
+    for (col_idx = 0; col_idx <= cur_col - 16; col_idx += 16) {
+        v_mean1 = 0;
+        v_mean2 = 0;
+        v_mean3 = 0;
+        v_mean4 = 0;
+        v_square1 = 0;
+        v_square2 = 0;
+        v_square3 = 0;
+        v_square4 = 0;
+
+        if (_row > 0) {
+            simd_load(v_mean1, mean + col_idx);
+            simd_load(v_square1, square + col_idx);
+        }
+        for (row_idx = 0; row_idx <= cur_row - 4; row_idx += 4) {
+            simd_load(v_x1, x + col_idx + row_idx * aligned_col);
+            simd_load(v_x2, x + col_idx + (row_idx + 1) * aligned_col);
+            simd_load(v_x3, x + col_idx + (row_idx + 2) * aligned_col);
+            simd_load(v_x4, x + col_idx + (row_idx + 3) * aligned_col);
+            v_mean1 += v_x1;
+            v_mean2 += v_x2;
+            v_mean3 += v_x3;
+            v_mean4 += v_x4;
+            v_square1 += v_x1 * v_x1;
+            v_square2 += v_x2 * v_x2;
+            v_square3 += v_x3 * v_x3;
+            v_square4 += v_x4 * v_x4;
+        }
+        for (; row_idx <= cur_row - 2; row_idx += 2) {
+            simd_load(v_x1, x + col_idx + row_idx * aligned_col);
+            simd_load(v_x2, x + col_idx + (row_idx + 1) * aligned_col);
+            v_mean1 += v_x1;
+            v_mean2 += v_x2;
+            v_square1 += v_x1 * v_x1;
+            v_square2 += v_x2 * v_x2;
+        }
+        for (; row_idx < cur_row; ++row_idx) {
+            simd_load(v_x1, x + col_idx + row_idx * aligned_col);
+            v_mean1 += v_x1;
+            v_square1 += v_x1 * v_x1;
+        }
+        v_mean1 += v_mean3;
+        v_mean2 += v_mean4;
+        v_mean1 += v_mean2;
+        v_square1 += v_square3;
+        v_square2 += v_square4;
+        v_square1 += v_square2;
+        simd_store(v_mean1, mean + col_idx);
+        simd_store(v_square1, square + col_idx);
+    }
+    for (; col_idx < cur_col; ++col_idx) {
+        for (row_idx = 0; row_idx < cur_row; ++row_idx) {
+            value = x[row_idx * aligned_col + col_idx];
+            mean[col_idx] += value;
+            square[col_idx] += value * value;
+        }
+    }
+}
+
+// deal with the data like (row, col) and transfer to (1, col)
+__global__ void teco_slave_reduce_variance_axis_left_float(ReduceVarianceArgs arg) {
+    const uint32_t spe_num = arg.spe_num;
+    const float* x = (float*)arg.x;
+    float* y = (float*)arg.y;
+
+    const int tid = threadIdx;
+    const int data_num = arg.data_num;
+    const int matrix_col = arg.matrix_col;
+    const int matrix_row = arg.matrix_row;
+    const int correction = arg.correction;
+
+    int row_per_loop = 224;
+    if (row_per_loop > matrix_row)
+        row_per_loop = (matrix_row + 15) / 16 * 16;
+    const int col_per_loop = 224;
+
+    int average_col = MAX(matrix_col / spe_num / 16 * 16, 16);
+    int average_row = MIN(matrix_row, row_per_loop);
+    average_col = MIN(average_col, col_per_loop);
+
+    int _col = tid * average_col;
+    if (_col >= matrix_col)
+        return;
+
+    const int block_size = row_per_loop * col_per_loop * sizeof(float);
+    float* xbuf = (float*)rt_spm_malloc(block_size);
+    float* tmpbuf = (float*)rt_spm_malloc(col_per_loop * sizeof(float) * 4);
+    float *meanbuf, *squarebuf, *ybuf;
+    meanbuf = tmpbuf + col_per_loop;
+    squarebuf = meanbuf + col_per_loop;
+    ybuf = squarebuf + col_per_loop;
+
+    memset(tmpbuf, 0.0f, col_per_loop * sizeof(float));
+    int cur_row, cur_col;
+    int dma_stride, dma_size, len_size;
+    int aligned_col, y_index;
+    floatv16 final_mean, final_square, final_variance, final_y;
+
+    Stride stride;
+    MemcpyHandle stride_handle(&stride);
+
+    for (; _col < matrix_col; _col += average_col * spe_num) {
+        memset(meanbuf, 0.0f, col_per_loop * sizeof(float));
+        memset(squarebuf, 0.0f, col_per_loop * sizeof(float));
+        memset(ybuf, 0.0f, col_per_loop * sizeof(float));
+        for (int _row = 0; _row < matrix_row; _row += average_row) {
+            cur_row = MIN(average_row, matrix_row - _row);
+            cur_col = MIN(average_col, matrix_col - _col);
+
+            dma_stride = matrix_col <= average_col ? 0 : matrix_col - cur_col;
+            dma_size = matrix_col <= average_col ? 0 : cur_col;
+            len_size = dma_size ? dma_size << 2 : cur_row * cur_col * sizeof(float);
+            // load the x data into xbuf
+            if (dma_size) {
+                stride_config(stride, (cur_row * cur_col * sizeof(float)) / (dma_size << 2),
+                              dma_stride << 2);
+            }
+            memcpy_async(xbuf, x + _col + _row * matrix_col, len_size, MemcpyGlobalToSpm,
+                         stride_handle);
+            memcpy_wait(stride_handle);
+            aligned_col = cur_col;
+            // xbuf data alignment
+            if (aligned_col % 16 != 0) {
+                for (int idx = cur_row - 1; idx >= 0; --idx) {
+                    memcpy(tmpbuf, xbuf + idx * cur_col, cur_col * sizeof(float));
+                    memcpy(xbuf + idx * col_per_loop, tmpbuf, cur_col * sizeof(float));
+                }
+                aligned_col = col_per_loop;
+            }
+            // computation
+            caculate_variance(xbuf, meanbuf, squarebuf, cur_col, cur_row, aligned_col, _row);
+        }
+        // compute y
+        for (y_index = 0; y_index <= cur_col - 16; y_index += 16) {
+            simd_load(final_mean, meanbuf + y_index);
+            simd_load(final_square, squarebuf + y_index);
+            final_variance = final_square - (final_mean / static_cast<float>(matrix_row * final_mean));  //NOLINT
+            final_y = final_variance / (static_cast<float>(matrix_row - correction));  //NOLINT
+            simd_store(final_y, ybuf + y_index);
+        }
+        float mean, variance;
+        for (; y_index < cur_col; ++y_index) {
+            mean = meanbuf[y_index];
+            variance = squarebuf[y_index] - (mean / matrix_row * mean);
+            ybuf[y_index] = variance / (matrix_row - correction);
+        }
+        // transfer data of ybuf to y
+        stride_config(stride, 1, 0);
+        memcpy_async(y + _col, ybuf, cur_col * sizeof(float), MemcpySpmToGlobal, stride_handle);
+        memcpy_wait(stride_handle);
+    }
+    rt_spm_free(xbuf);
+    rt_spm_free(tmpbuf);
+}

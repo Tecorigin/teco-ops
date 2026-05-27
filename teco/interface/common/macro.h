@@ -24,28 +24,21 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#ifndef TECOOPS_INTERFACE_COMMON_MACRO_H_
+#define TECOOPS_INTERFACE_COMMON_MACRO_H_
 
-#include "interface/include/tecoops.h"
-#include "ual/com/def.h"
-#include "ual/com/status.h"
+#include "interface/common/check.h"
 
-namespace tecoops {
+#define TECO_PREDICT_FALSE(x) (__builtin_expect(!!(x), 0))
+#define TECO_PREDICT_TRUE(x) (__builtin_expect(!!(x), 1))
 
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
+#define RUN_OP(op_type, args, patch_args, handle)                                                  \
+    do {                                                                                           \
+        op_type impl {};                                                                           \
+        auto status = impl.find(&patch_args);                                                      \
+        checkUalStatusInTecoops(status);                                                           \
+        status = impl.run(&args, handle->stream);                                                  \
+        checkUalStatusInTecoops(status);                                                           \
+    } while (0);
 
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
-
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
-
-    static const char* toStatusStr(ual::common::Status status);
-
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
-};
-
-}  // namespace tecoops
-
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#endif  // TECOOPS_INTERFACE_COMMON_MACRO_H_

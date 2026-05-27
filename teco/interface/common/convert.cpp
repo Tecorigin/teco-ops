@@ -26,7 +26,12 @@
 
 #include "interface/common/convert.h"
 
+#include <stdexcept>
+
+#include "ual/com/def.h"
 namespace tecoops {
+
+using tecoops::ual::common::UALDataType;
 
 tecoopsStatus_t Convert::toStatus(ual::common::Status status) {
     switch (status) {
@@ -47,8 +52,64 @@ tecoopsStatus_t Convert::toStatus(ual::common::Status status) {
     }
 }
 
-ual::common::UALDataType Convert::toUALDataType(tecoopsAlgo_t algo) {
-    return ual::common::UAL_DTYPE_FLOAT;
+ual::common::UALDataType Convert::toUALDataType(const tecoopsDataType_t data_type) {
+    switch (data_type) {
+        case tecoopsDataType_t::TECOOPS_DATA_BOOL:
+            return UALDataType::UAL_DTYPE_BOOL;
+        case tecoopsDataType_t::TECOOPS_DATA_FLOAT:
+            return UALDataType::UAL_DTYPE_FLOAT;
+        case tecoopsDataType_t::TECOOPS_DATA_HALF:
+            return UALDataType::UAL_DTYPE_HALF;
+        case tecoopsDataType_t::TECOOPS_DATA_INT8:
+            return UALDataType::UAL_DTYPE_INT8;
+        case tecoopsDataType_t::TECOOPS_DATA_INT16:
+            return UALDataType::UAL_DTYPE_INT16;
+        case tecoopsDataType_t::TECOOPS_DATA_INT32:
+            return UALDataType::UAL_DTYPE_INT32;
+        case tecoopsDataType_t::TECOOPS_DATA_INT64:
+            return UALDataType::UAL_DTYPE_INT64;
+        case tecoopsDataType_t::TECOOPS_DATA_UINT8:
+            return UALDataType::UAL_DTYPE_UINT8;
+        case tecoopsDataType_t::TECOOPS_DATA_DOUBLE:
+            return UALDataType::UAL_DTYPE_DOUBLE;
+        case tecoopsDataType_t::TECOOPS_DATA_BFLOAT16:
+            return UALDataType::UAL_DTYPE_BFLOAT16;
+        case tecoopsDataType_t::TECOOPS_DATA_COMPLEX_FLOAT:
+            return UALDataType::UAL_DTYPE_COMPLEX_FLOAT;  // NOLINT
+        default: {
+            throw std::runtime_error(
+                // NOLINTNEXTLINE
+                "tecoopsDataType_t convert to UALDataType failed, not exist tecoopsDataType_t enum "
+                "type!");
+        };
+    }
+}
+
+unsigned int Convert::toDescDataTypeSize(const tecoopsDataType_t data_type) {
+    switch (data_type) {
+        case tecoopsDataType_t::TECOOPS_DATA_INT8:
+        case tecoopsDataType_t::TECOOPS_DATA_UINT8:
+        case tecoopsDataType_t::TECOOPS_DATA_BOOL: {
+            return sizeof(char);
+        } break;
+        case tecoopsDataType_t::TECOOPS_DATA_BFLOAT16:
+        case tecoopsDataType_t::TECOOPS_DATA_HALF:
+        case tecoopsDataType_t::TECOOPS_DATA_INT16: {
+            return 2 * sizeof(char);
+        } break;
+        case tecoopsDataType_t::TECOOPS_DATA_FLOAT:
+        case tecoopsDataType_t::TECOOPS_DATA_INT32: {
+            return 4 * sizeof(char);
+        } break;
+        case tecoopsDataType_t::TECOOPS_DATA_INT64:
+        case tecoopsDataType_t::TECOOPS_DATA_COMPLEX_FLOAT:
+        case tecoopsDataType_t::TECOOPS_DATA_DOUBLE: {
+            return 8 * sizeof(char);
+        } break;
+        default: {
+            throw std::runtime_error("not exist tecoopsDataType_t enum type!");
+        } break;
+    }
 }
 
 ual::common::UALAlgoType Convert::toUALAlgoType(tecoopsAlgo_t algo) {

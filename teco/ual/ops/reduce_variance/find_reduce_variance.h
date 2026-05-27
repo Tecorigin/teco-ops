@@ -24,28 +24,23 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_CONVERT_H_
-#define TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#ifndef TECOOPS_UAL_OPS_REDUCE_VARIANCE_FIND_REDUCE_VARIANCE_H_
+#define TECOOPS_UAL_OPS_REDUCE_VARIANCE_FIND_REDUCE_VARIANCE_H_
 
-#include "interface/include/tecoops.h"
-#include "ual/com/def.h"
-#include "ual/com/status.h"
+#include "ual/args/reduce_variance_args.h"
+// #include "ual/ops/ops_com/algorithm_finder.h"
+// #include "ual/common/configure.h"
 
 namespace tecoops {
+namespace ual {
+namespace ops {
 
-class Convert {
-   public:
-    static tecoopsStatus_t toStatus(ual::common::Status status);
+using tecoops::ual::args::ReduceVariancePatchArgs;
 
-    static ual::common::UALDataType toUALDataType(tecoopsDataType_t algo);
+int findReduceVarianceBranch(const ReduceVariancePatchArgs *args);
 
-    static ual::common::UALAlgoType toUALAlgoType(tecoopsAlgo_t algo);
-
-    static const char* toStatusStr(ual::common::Status status);
-
-    static unsigned int toDescDataTypeSize(const tecoopsDataType_t data_type);
-};
-
+}  // namespace ops
+}  // namespace ual
 }  // namespace tecoops
 
-#endif  // TECOOPS_INTERFACE_COMMON_CONVERT_H_
+#endif  // TECOOPS_UAL_OPS_REDUCE_VARIANCE_FIND_REDUCE_VARIANCE_H_

@@ -1,19 +1,18 @@
-#include "interface/include/tecoops.h"
-#include "interface/common/marco.h"
-#include "interface/common/convert.h"
-#include "interface/common/handle.h"
-#include "ual/args/flatten_rays_args.h"
 #include "ual/ops/flatten_rays/flatten_rays.hpp"
 
+#include "interface/common/convert.h"
+#include "interface/common/macro.h"
+#include "interface/include/builtin_type.h"
+#include "interface/include/tecoops.h"
+#include "ual/args/flatten_rays_args.h"
+
+using tecoops::Convert;
 using tecoops::ual::args::FlattenRaysArgs;
 using tecoops::ual::args::FlattenRaysPatchArgs;
 using tecoops::ual::ops::FlattenRaysOp;
-using tecoops::Convert;
 
-tecoopsStatus_t tecoopsFlattenRays(
-    tecoopsHandle_t handle,
-    const int *rays, uint32_t N, uint32_t M, int *res,
-    tecoopsAlgo_t algo) {
+tecoopsStatus_t tecoopsFlattenRays(tecoopsHandle_t handle, const int* rays, uint32_t N, uint32_t M,
+                                   int* res, tecoopsAlgo_t algo) {
     if (handle == nullptr) {
         return TECOOPS_STATUS_NOT_INITIALIZED;
     }

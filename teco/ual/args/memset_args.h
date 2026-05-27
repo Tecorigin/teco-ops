@@ -5,8 +5,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice,
-//    this list of conditions and the following disclaimer.
+// 1. Redistributions of source code must retain the above copyright notice, this
+//    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
 //    this list of conditions and the following disclaimer in the documentation
@@ -27,49 +27,27 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef TECOOPS_UAL_COM_DEF_H_
-#define TECOOPS_UAL_COM_DEF_H_
+#ifndef TECO_UAL_ARGS_MEMSET_ARGS_H_
+#define TECO_UAL_ARGS_MEMSET_ARGS_H_
 
-#include "ual/com/status.h"
+#include "ual/com/def.h"
 
 namespace tecoops {
 namespace ual {
-namespace common {
+namespace args {
 
-typedef enum {
-    UAL_DTYPE_FLOAT = 0,
-    UAL_DTYPE_HALF = 1,
-    UAL_DTYPE_INT8 = 2,
-    UAL_DTYPE_INT16 = 3,
-    UAL_DTYPE_INT32 = 4,
-    UAL_DTYPE_INT64 = 5,
-    UAL_DTYPE_UINT8 = 6,
-    UAL_DTYPE_BOOL = 7,
-    UAL_DTYPE_DOUBLE = 8,
-    UAL_DTYPE_UINT16 = 9,
-    UAL_DTYPE_UINT32 = 10,
-    UAL_DTYPE_UINT64 = 11,
-    UAL_DTYPE_COMPLEX_FLOAT = 12,
-    UAL_DTYPE_COMPLEX_HALF = 13,
-    UAL_DTYPE_COMPLEX_DOUBLE = 14,
-    UAL_DTYPE_BFLOAT16 = 15,
-} UALDataType;
+struct MemsetArgs {
+    // TBR int core_num;
+    int spe_num;
+    unsigned long long data_size;
+    int value;
+    void *x;
+};
 
-typedef enum {
-    ALGO_0 = 0,
-    ALGO_1,
-    ALGO_2,
-    ALGO_3,
-    ALGO_4,
-    ALGO_5,
-    ALGO_6,
-    ALGO_7,
-    ALGO_8,
-    ALGO_9,
-} UALAlgoType;
 
-}  // namespace common
+}  // namespace args
 }  // namespace ual
 }  // namespace tecoops
 
-#endif  // TECOOPS_UAL_COM_DEF_H_
+
+#endif  // TECO_UAL_ARGS_MEMSET_ARGS_H_

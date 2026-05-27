@@ -1,0 +1,269 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/reduce_variance/reduce_variance.h"
+using namespace sdaa;  // NOLINT
+
+// macro definition of MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+// macro definition of MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+// macro definition of current data buffer selected
+#define CDBUF(x) (buf_dbflag == 0 ? x##0 : x##1)
+// macro definition of alternative data buffer selected
+#define ADBUF(x) (buf_dbflag == 0 ? x##1 : x##0)
+// macro definition of exchanging flag
+#define EXDBF buf_dbflag = 1 - buf_dbflag
+
+// caculate_large_variance
+__device__ static __always_inline void caculate_large_variance(float* x, float* mean, float* square,
+                                                               const int cur_col, const int cur_row,
+                                                               const int aligned_col) {
+    int row_idx, col_idx;
+    floatv16 vf_x, vf_mean, vf_square;
+    double v_x, v_mean, v_square;
+
+    for (row_idx = 0; row_idx < cur_row; ++row_idx) {
+        vf_mean = 0.0f, vf_square = 0.0f;
+        v_mean = 0.0f, v_square = 0.0f;
+        for (col_idx = 0; col_idx <= cur_col - 16; col_idx += 16) {
+            simd_load(vf_x, x + row_idx * aligned_col + col_idx);
+            vf_mean += vf_x;
+            vf_square += vf_x * vf_x;
+        }
+        for (int i = 0; i < 16; ++i) {
+            v_mean += vf_mean[i];
+            v_square += vf_square[i];
+        }
+        for (; col_idx < cur_col; ++col_idx) {
+            v_x = x[row_idx * aligned_col + col_idx];
+            mean[row_idx] += v_x;
+            square[row_idx] += (v_x * v_x);
+        }
+        mean[row_idx] += (float)v_mean;  // NOLINT
+        square[row_idx] += (float)v_square;  // NOLINT
+    }
+}
+
+// caculate_tiny_variance
+__device__ static __always_inline void caculate_tiny_variance(float* x, float* y, const int cur_row,
+                                                              const int average_col,
+                                                              const int correction) {
+    int row_idx, col_idx;
+    double v_mean, v_square, value, variance;
+
+    if (average_col % 16 == 0) {
+        floatv16 vf_x, vf_mean, vf_square;
+        for (row_idx = 0; row_idx < cur_row; ++row_idx) {
+            vf_mean = 0.0f, vf_square = 0.0f;
+            v_mean = 0.0f, v_square = 0.0f;
+            for (col_idx = 0; col_idx <= average_col - 16; col_idx += 16) {
+                simd_load(vf_x, x + row_idx * average_col + col_idx);
+                vf_mean += vf_x;
+                vf_square += vf_x * vf_x;
+            }
+            for (int i = 0; i < 16; ++i) {
+                v_mean += vf_mean[i];
+                v_square += vf_square[i];
+            }
+            variance = v_square - (v_mean / average_col * v_mean);
+            y[row_idx] = (float)(variance / (average_col - correction));  // NOLINT
+        }
+    } else {
+        for (row_idx = 0; row_idx < cur_row; ++row_idx) {
+            v_mean = 0.0f, v_square = 0.0f;
+            for (col_idx = 0; col_idx < average_col; ++col_idx) {
+                value = x[row_idx * average_col + col_idx];
+                v_mean += value;
+                v_square += value * value;
+            }
+            variance = v_square - (v_mean / average_col * v_mean);
+            y[row_idx] = (float)(variance / (average_col - correction));  // NOLINT
+        }
+    }
+}
+
+// deal with the data like (row, col) and transfer to (row, 1)
+__global__ void teco_slave_reduce_variance_axis_right_float(ReduceVarianceArgs arg) {
+    const uint32_t spe_num = arg.spe_num;
+    const float* x = (float*)(arg.x);  // NOLINT
+    float* y = (float*)(arg.y);  // NOLINT
+
+    const int tid = threadIdx;
+    const int data_num = arg.data_num;
+    const int matrix_col = arg.matrix_col;
+    const int matrix_row = arg.matrix_row;
+    const int correction = arg.correction;
+
+    int row_per_loop = 224;
+    if (row_per_loop > matrix_row)
+        row_per_loop = (matrix_row + 15) / 16 * 16;
+    const int col_per_loop = 224;
+
+    int average_row = MAX(matrix_row / spe_num / 16 * 16, 16);
+    int average_col;
+
+    if (matrix_col > col_per_loop) {
+        average_row = MIN(average_row, row_per_loop);
+        average_col = col_per_loop;
+        int _row = tid * average_row;
+        if (_row > matrix_row)
+            return;
+
+        const int block_size = sizeof(float) * average_row * average_col;  // NOLINT
+        float* xbuf = (float*)rt_spm_malloc(block_size);  // NOLINT
+        float* meanbuf = (float*)rt_spm_malloc(average_row * sizeof(float) * 3);  // NOLINT
+        float* squarebuf = meanbuf + average_row;
+        float* ybuf = squarebuf + average_row;
+
+        float* tmpbuf = (float*)rt_spm_malloc(average_col * sizeof(float));  // NOLINT
+        memset(tmpbuf, 0.0f, average_col * sizeof(float));
+
+        int _col, y_index, aligned_col;
+        int cur_row, cur_col;
+        int dma_stride, dma_size, len_size;
+
+        Stride stride;
+        MemcpyHandle stride_handle(&stride);
+
+        for (; _row < matrix_row; _row += average_row * spe_num) {
+            memset(meanbuf, 0.0f, average_row * sizeof(float));
+            memset(squarebuf, 0.0f, average_row * sizeof(float));
+            memset(ybuf, 0.0f, average_row * sizeof(float));
+            for (_col = 0; _col < matrix_col; _col += average_col) {
+                cur_row = MIN(average_row, matrix_row - _row);
+                cur_col = MIN(average_col, matrix_col - _col);
+
+                dma_stride = matrix_col <= col_per_loop ? 0 : matrix_col - cur_col;
+                dma_size = matrix_col <= col_per_loop ? 0 : cur_col;
+                len_size = dma_size ? dma_size << 2 : cur_row * cur_col * sizeof(float);
+
+                // load the x data into xbuf
+                if (dma_size) {
+                    stride_config(stride, (cur_row * cur_col) / dma_size, dma_stride << 2);
+                }
+                memcpy_async(xbuf, x + _row * matrix_col + _col, len_size, MemcpyGlobalToSpm,
+                             stride_handle);
+                memcpy_wait(stride_handle);
+
+                aligned_col = cur_col;
+                // xbuf data alignment
+                if (aligned_col % 16 != 0) {
+                    for (int idx = cur_row - 1; idx >= 0; --idx) {
+                        memcpy(tmpbuf, xbuf + idx * cur_col, cur_col * sizeof(float));
+                        memcpy(xbuf + idx * average_col, tmpbuf, cur_col * sizeof(float));
+                    }
+                    aligned_col = average_col;
+                }
+                // caculation
+                caculate_large_variance(xbuf, meanbuf, squarebuf, cur_col, cur_row, aligned_col);
+            }
+            // caculate y
+            floatv16 final_mean, final_square, final_variance, final_y;
+            for (y_index = 0; y_index <= cur_row - 16; y_index += 16) {
+                simd_load(final_mean, meanbuf + y_index);
+                simd_load(final_square, squarebuf + y_index);
+                final_variance = final_square - (final_mean / (float)matrix_col * final_mean);  // NOLINT
+                final_y = final_variance / ((float)matrix_col - correction);  // NOLINT
+                simd_store(final_y, ybuf + y_index);
+            }
+            float mean, variance;
+            for (; y_index < cur_row; ++y_index) {
+                mean = meanbuf[y_index];
+                variance = squarebuf[y_index] - (mean / matrix_col * mean);
+                ybuf[y_index] = variance / (matrix_col - correction);
+            }
+            // transfer data of ybuf to y
+            stride_config(stride, 1, 0);
+            memcpy_async(y + _row, ybuf, cur_row * sizeof(float), MemcpySpmToGlobal, stride_handle);
+            memcpy_wait(stride_handle);
+        }
+        rt_spm_free(xbuf);
+        rt_spm_free(meanbuf);
+        rt_spm_free(tmpbuf);
+    } else {
+        average_row = MIN(average_row, row_per_loop / 2);
+        average_col = matrix_col;
+        int _row = tid * average_row;
+        if (_row >= matrix_row)
+            return;
+
+        // double buffer
+        const int block_size = average_row * average_col * sizeof(float);
+        float* xbuf0 = (float*)rt_spm_malloc(block_size * 2);
+        float *xbuf1, *ybuf1;
+        xbuf1 = xbuf0 + average_row * average_col;
+
+        float* ybuf0 = (float*)rt_spm_malloc(average_row * sizeof(float) * 2);
+        ybuf1 = ybuf0 + average_row;
+
+        int buf_dbflag = 0;
+        int next_num, flag_next;
+        int cur_row, next_row;
+
+        MemcpyHandle get_handle[2];
+        MemcpyHandle put_handle[2];
+
+        // load the current x data into xbuf
+        cur_row = MIN(average_row, matrix_row - _row);
+        memcpy_async(CDBUF(xbuf), x + _row * average_col, (cur_row * average_col) * sizeof(float),
+                     MemcpyGlobalToSpm, get_handle[buf_dbflag]);
+
+        for (; _row < matrix_row; _row += average_row * spe_num) {
+            memset(CDBUF(ybuf), 0, average_row * sizeof(float));
+
+            next_num = _row + average_row * spe_num;
+            flag_next = next_num < matrix_row;
+            // load the alternative x data into xbuf
+            if (flag_next) {
+                next_row = MIN(average_row, matrix_row - next_num);
+                memcpy_async(ADBUF(xbuf), x + next_num * average_col,
+                             (next_row * average_col) * sizeof(float), MemcpyGlobalToSpm,
+                             get_handle[1 - buf_dbflag]);
+            }
+            memcpy_wait(get_handle[buf_dbflag]);
+            memcpy_wait(put_handle[buf_dbflag]);
+
+            // caculation
+            caculate_tiny_variance(CDBUF(xbuf), CDBUF(ybuf), cur_row, average_col, correction);
+            // transfer data of ybuf to y
+            memcpy_async(y + _row, CDBUF(ybuf), cur_row * sizeof(float), MemcpySpmToGlobal,
+                         put_handle[buf_dbflag]);
+            memcpy_wait(put_handle[buf_dbflag]);
+            if (flag_next) {
+                EXDBF;
+                cur_row = next_row;
+            }
+        }
+        rt_spm_free(xbuf0);
+        rt_spm_free(ybuf0);
+    }
+}

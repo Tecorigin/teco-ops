@@ -28,38 +28,39 @@
 #define TECOOPS_INTERFACE_COMMON_CHECK_H_
 
 #include <cstdio>
+
 #include "interface/common/convert.h"
 #include "interface/include/tecoops.h"
 
 namespace tecoops {
 
-#define checkUalStatus(a)                                                                   \
-    do {                                                                                    \
-        tecoops::ual::common::Status __status = a;                                          \
-        if (tecoops::ual::common::Status::SUCCESS != (__status)) {                          \
-            fprintf(stderr, "tecoops runtime error in line %d of file %s : %d \n", __LINE__, \
-                    __FILE__, static_cast<int>(__status));                                   \
-            return __status;                                                                \
-        }                                                                                   \
+#define checkUalStatus(a)                                                                          \
+    do {                                                                                           \
+        tecoops::ual::common::Status __status = a;                                                 \
+        if (tecoops::ual::common::Status::SUCCESS != (__status)) {                                 \
+            fprintf(stderr, "tecoops runtime error in line %d of file %s : %d \n", __LINE__,       \
+                    __FILE__, static_cast<int>(__status));                                         \
+            return __status;                                                                       \
+        }                                                                                          \
     } while (0);
 
-#define checkUalStatusInTecoops(a)                                                            \
-    do {                                                                                     \
-        tecoops::ual::common::Status __status = a;                                            \
-        if (tecoops::ual::common::Status::SUCCESS != (__status)) {                            \
-            fprintf(stderr, "tecoual runtime error in line %d of file %s : %d \n", __LINE__, \
-                    __FILE__, static_cast<int>(__status));                                    \
-            return tecoops::Convert::toStatus(__status);                                     \
-        }                                                                                    \
+#define checkUalStatusInTecoops(a)                                                                 \
+    do {                                                                                           \
+        tecoops::ual::common::Status __status = a;                                                 \
+        if (tecoops::ual::common::Status::SUCCESS != (__status)) {                                 \
+            fprintf(stderr, "tecoual runtime error in line %d of file %s : %d \n", __LINE__,       \
+                    __FILE__, static_cast<int>(__status));                                         \
+            return tecoops::Convert::toStatus(__status);                                           \
+        }                                                                                          \
     } while (0);
 
-#define checkTecoopsStatus(status)                                                   \
-    do {                                                                            \
-        tecoopsStatus_t __errcode = status;                                          \
-        if (__errcode != TECOOPS_STATUS_SUCCESS) {                                   \
-            fprintf(stderr, "TECOOPS Error: %d\n", __errcode);                       \
-            return __errcode;                                                       \
-        }                                                                           \
+#define checkTecoopsStatus(status)                                                                 \
+    do {                                                                                           \
+        tecoopsStatus_t __errcode = status;                                                        \
+        if (__errcode != TECOOPS_STATUS_SUCCESS) {                                                 \
+            fprintf(stderr, "TECOOPS Error: %d\n", __errcode);                                     \
+            return __errcode;                                                                      \
+        }                                                                                          \
     } while (0);
 
 }  // namespace tecoops

@@ -1,0 +1,140 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include <simd.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/memset/memset.h"
+
+using namespace tecoops::ual::args;  // NOLINT
+using namespace sdaa;  // NOLINT
+
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+#define MAX_USED_SPM_SIZE 225280  // 220KB for uses
+#define OP_BLOCK_SIZE (16 * 1024)
+
+__device__ static void simd_memset(unsigned int* buf, int num, unsigned int value) {
+    uintv16 v = value;
+    for (int i = 0; i < num; i += 512) {
+        int* ptr = (int*)(buf + i);
+        simd_store(v, ptr);
+        simd_store(v, ptr + 16);
+        simd_store(v, ptr + 32);
+        simd_store(v, ptr + 48);
+        simd_store(v, ptr + 64);
+        simd_store(v, ptr + 80);
+        simd_store(v, ptr + 96);
+        simd_store(v, ptr + 112);
+        simd_store(v, ptr + 128);
+        simd_store(v, ptr + 144);
+        simd_store(v, ptr + 160);
+        simd_store(v, ptr + 176);
+        simd_store(v, ptr + 192);
+        simd_store(v, ptr + 208);
+        simd_store(v, ptr + 224);
+        simd_store(v, ptr + 240);
+        simd_store(v, ptr + 256);
+        simd_store(v, ptr + 272);
+        simd_store(v, ptr + 288);
+        simd_store(v, ptr + 304);
+        simd_store(v, ptr + 320);
+        simd_store(v, ptr + 336);
+        simd_store(v, ptr + 352);
+        simd_store(v, ptr + 368);
+        simd_store(v, ptr + 384);
+        simd_store(v, ptr + 400);
+        simd_store(v, ptr + 416);
+        simd_store(v, ptr + 432);
+        simd_store(v, ptr + 448);
+        simd_store(v, ptr + 464);
+        simd_store(v, ptr + 480);
+        simd_store(v, ptr + 496);
+    }
+}
+
+__global__ void teco_slave_memset_4B_align(MemsetArgs mem_arg) {
+    const int spe_num = mem_arg.spe_num;
+    unsigned char tmp = (unsigned char)mem_arg.value;  // single-byte out-of-bounds handling
+    unsigned int temp = (unsigned int)tmp;
+    const unsigned long temp_size = mem_arg.data_size;  // NOLINT
+
+    unsigned int bias = (4 - (unsigned long)(mem_arg.x) % 4) % 4;  // NOLINT
+    unsigned char* ori_x = (unsigned char*)mem_arg.x;
+    if (temp_size < sizeof(unsigned int)) {
+        if (threadIdx == 0) {
+            for (int i = 0; i < temp_size; i++) {
+                ori_x[i] = tmp;
+            }
+        }
+        return;
+    }
+
+    if (threadIdx == 0) {
+        for (int i = 0; i < bias && i < temp_size; i++) {
+            ori_x[i] = tmp;
+        }
+    }
+
+    unsigned int* x = (unsigned int*)(ori_x + bias);
+    const unsigned long long data_size = temp_size - bias;  // NOLINT
+
+    unsigned int value = 0;
+    value |= temp;
+    value |= (temp << 8);
+    value |= (temp << 16);
+    value |= (temp << 24);
+
+    unsigned long long total_num = data_size / sizeof(unsigned int);  // NOLINT
+    unsigned long long spe_total_num = total_num / threadDim;  // NOLINT
+    unsigned long long data_num = spe_total_num * threadDim;  // NOLINTs
+    unsigned int remain_size = data_size - data_num * sizeof(unsigned int);
+
+    // TBR const int tid = _PEN;
+    const int tid = threadIdx;
+
+    unsigned int* buf0 = 0;
+    int blockNum = OP_BLOCK_SIZE / sizeof(unsigned int);
+    buf0 = (unsigned int*)rt_spm_malloc(OP_BLOCK_SIZE);
+
+    simd_memset(buf0, blockNum, value);
+
+    const int BLK = MIN(blockNum, (spe_total_num + 127) / 128 * 128);
+
+    for (size_t i = tid * BLK; i < data_num; i += BLK * threadDim) {
+        const size_t curr_blk = MIN(BLK, data_num - i);
+        memcpy_async(x + i, buf0, curr_blk * sizeof(unsigned int), MemcpySpmToGlobal);
+    }
+    memcpy_wait();
+    if (tid == 0) {
+        unsigned char* from = (unsigned char*)(x + data_num);
+        for (int i = 0; i < remain_size; i++)
+            from[i] = tmp;
+    }
+
+    rt_spm_free(buf0);
+    return;
+}

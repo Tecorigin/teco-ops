@@ -24,15 +24,62 @@
 // WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 // OF SUCH DAMAGE.
 
-#ifndef TECOOPS_INTERFACE_COMMON_HANDLE_H_
-#define TECOOPS_INTERFACE_COMMON_HANDLE_H_
+#ifndef TECOOPS_UAL_OPS_MEMSET_MEMSET_HPP_
+#define TECOOPS_UAL_OPS_MEMSET_MEMSET_HPP_
 
-#include <sdaa_runtime.h>
+#include "ual/ops/base_op.hpp"
+#include "ual/com/log.h"
+#include "ual/ops/memset/find_memset.h"
+#include "ual/kernel/memset/memset.h" 
 
-struct tecoopsContext {
-    int spa_num;
-    int spe_num;
-    sdaaStream_t stream;
+
+namespace tecoops {
+namespace ual {
+namespace ops {
+
+using tecoops::ual::args::MemsetArgs;
+using tecoops::ual::common::Status;
+
+struct MemsetType {
+    using ArgsType = MemsetArgs;      // using implement kernel args
+    using PatchType = MemsetArgs;  // using dispatch args
+    using RetType = void;
+    using PImplType = void (*)(ArgsType);
 };
 
-#endif  // TECOOPS_INTERFACE_COMMON_HANDLE_H_
+static MemsetType::PImplType MemsetAlgos[] = {
+    teco_slave_memset_4B_align,
+};
+
+// algo name
+static const char *MemsetDiscription[] = {
+    "teco_slave_memset_4B_align",
+};
+struct MemsetOp : public BaseOp<MemsetOp, MemsetType> {
+ public:
+    using ArgsType = typename MemsetType::ArgsType;
+    using PatchType = typename MemsetType::PatchType;
+    using RetType = typename MemsetType::RetType;
+    using PImplType = typename MemsetType::PImplType;
+
+    MemsetOp() = default;
+    ~MemsetOp() = default;
+
+    static const char *name() { return "memset"; }
+
+    Status findImpl(const PatchType *args) {
+        int index = findMemsetBranch(args);
+        if (index == -1) {
+            ERROR("memset branch is not exit!");
+            return Status::NOT_IMPLEMENTED;
+        }
+        setInstance(MemsetAlgos[index], MemsetDiscription[index]);
+        return Status::SUCCESS;
+    }
+};
+
+}  // namespace ops
+}  // namespace ual
+}  // namespace tecoops
+
+#endif  // TECOOPS_UAL_OPS_MEMSET_MEMSET_HPP_
