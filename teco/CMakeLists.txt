@@ -31,6 +31,39 @@ else()
     message(STATUS "WITH_TORCH is disabled")
 endif()
 
+option(WITH_INFERENCE_PLUGIN "Enable Teco-inference Plugin support" OFF)
+if(WITH_INFERENCE_PLUGIN)
+    add_definitions(-DWITH_INFERENCE_PLUGIN)
+    file(GLOB_RECURSE SRC_PLUGIN "${OPS_DIR}/plugin/*/*.cc")
+    set(FIND_SDAART "/opt/tecoai/lib64")
+    set(FIND_PluginUtil "$ENV{TECO_INFER_PLUGIN_UTIL_PATH}")
+    set(PLUGIN_LIBS ${FIND_SDAART}/libsdaart.so ${FIND_PluginUtil}/libTecoInferPluginUtil.so)
+    set(PLUGIN_INCLUDES
+        -I/opt/tecoai/include
+        -I/opt/tecoai/include/dyn/include
+        -I/opt/tecoai/include/dyn/src
+        -I/opt/tecoai/include/teco_infer_dyn
+        -I${OPS_DIR}
+    )
+    set(PLUGIN_COMPILE_FLAGS -O3 -std=c++17 -fPIC -DWITH_INFERENCE_PLUGIN)
+    set(PLUGIN_OBJ_DIR ${CMAKE_BINARY_DIR}/plugin_objs)
+    set(PLUGIN_OBJECTS "")
+    add_custom_target(plugin_mkdir ALL COMMAND ${CMAKE_COMMAND} -E make_directory ${PLUGIN_OBJ_DIR})
+    foreach(src ${SRC_PLUGIN})
+        get_filename_component(src_name ${src} NAME)
+        list(APPEND PLUGIN_OBJECTS ${PLUGIN_OBJ_DIR}/${src_name}.o)
+        add_custom_command(OUTPUT ${PLUGIN_OBJ_DIR}/${src_name}.o
+            COMMAND g++ -c ${src} -o ${PLUGIN_OBJ_DIR}/${src_name}.o ${PLUGIN_COMPILE_FLAGS} ${PLUGIN_INCLUDES}
+            DEPENDS ${src}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+    endforeach()
+    add_custom_target(plugin_compile ALL DEPENDS plugin_mkdir ${PLUGIN_OBJECTS})
+    message(STATUS "WITH_INFERENCE_PLUGIN is enabled")
+else()
+    message(STATUS "WITH_INFERENCE_PLUGIN is disabled")
+endif()
+
 set(TECOOPS_OPS_PATH ${OPS_DIR}/interface/ops)
 
 file(GLOB_RECURSE SRC_INTERFACE_COMMON "${OPS_DIR}/interface/common/*.cpp")
@@ -62,13 +95,36 @@ else()
     set(TORCH_LINK_FLAGS "")
 endif()
 
-add_custom_target(ops_lib ALL
-        COMMAND mkdir -p ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-        COMMAND tecocc $<TARGET_OBJECTS:ops_objs> -flto -ffp-contract=fast -fPIC -shared --sdaa-link -fuse-ld=lld
-        ${TORCH_LINK_FLAGS}
-        -o ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libteco_ops.so
-        COMMAND_EXPAND_LISTS
-)
+if(WITH_INFERENCE_PLUGIN)
+    set(TECO_OPS_PLUGIN_LIB ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libteco_ops_plugin.so)
+    set(TECO_INFER_PLUGIN_LIB ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libTecoInferPlugin.so)
 
-add_dependencies(ops_lib ops_objs)
+    add_custom_target(ops_lib ALL
+            COMMAND mkdir -p ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+            COMMAND tecocc $<TARGET_OBJECTS:ops_objs>
+            -flto -ffp-contract=fast -fPIC -shared --sdaa-link -fuse-ld=lld
+            -o ${TECO_OPS_PLUGIN_LIB}
+            COMMAND_EXPAND_LISTS
+    )
+    add_dependencies(ops_lib ops_objs)
+
+    add_custom_target(plugin_lib ALL
+            COMMAND gcc ${PLUGIN_OBJECTS}
+            -L${CMAKE_LIBRARY_OUTPUT_DIRECTORY} -lteco_ops_plugin
+            ${PLUGIN_LIBS}
+            -shared -o ${TECO_INFER_PLUGIN_LIB}
+            COMMAND_EXPAND_LISTS
+    )
+    add_dependencies(plugin_lib ops_lib plugin_compile)
+else()
+    add_custom_target(ops_lib ALL
+            COMMAND mkdir -p ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+            COMMAND tecocc $<TARGET_OBJECTS:ops_objs> -flto -ffp-contract=fast -fPIC -shared --sdaa-link -fuse-ld=lld
+            ${TORCH_LINK_FLAGS}
+            -o ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libteco_ops.so
+            COMMAND_EXPAND_LISTS
+    )
+    add_dependencies(ops_lib ops_objs)
+endif()
+
 set(CMAKE_CXX_LINK_FLAGS "-L$ENV{SDAA_HOME}/lib64  -lsdaart")

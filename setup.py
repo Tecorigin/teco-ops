@@ -38,6 +38,9 @@ class CMakeClean(clean):
 
 with_torch = os.environ.get("WITH_TORCH", "ON")
 
+ext_modules = []
+cmdclass = {"clean": CMakeClean}
+
 if with_torch == "ON":
     print("WITH_TORCH=ON: Using TecoExtension for all modules")
     try:
@@ -56,6 +59,45 @@ if with_torch == "ON":
             shutil.rmtree(teco_build_dir)
         os.makedirs(teco_build_dir, exist_ok=True)
 
+        try:
+            import tvm
+            tvm_path = os.path.dirname(tvm.__file__)
+            os.environ["TECO_INFER_PLUGIN_UTIL_PATH"] = tvm_path
+        except ImportError:
+            pass
+
+        # Build first pass: WITH_INFERENCE_PLUGIN=ON (produces libteco_ops_plugin.so + libTecoInferPlugin.so)
+        cmake_cmd = [
+            "cmake",
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + teco_lib_dir,
+            "-DWITH_INFERENCE_PLUGIN=ON",
+            "-S", teco_source_dir,
+            "-B", teco_build_dir
+        ]
+        result = subprocess.run(cmake_cmd, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError("CMake configure failed (plugin): " + result.stderr.decode(errors='replace'))
+        result = subprocess.run(["cmake", "--build", teco_build_dir], capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError("CMake build failed (plugin): " + result.stderr.decode(errors='replace'))
+        print("libteco_ops_plugin.so and libTecoInferPlugin.so built successfully!")
+
+        teco_ops_plugin_lib = os.path.join(teco_lib_dir, "libteco_ops_plugin.so")
+        teco_ops_plugin_dest = os.path.join(current_path, "api", "tecoops", "libteco_ops_plugin.so")
+        shutil.copy2(teco_ops_plugin_lib, teco_ops_plugin_dest)
+        print(f"Copied libteco_ops_plugin.so to api/tecoops/libteco_ops_plugin.so")
+
+        teco_infer_plugin_lib = os.path.join(teco_lib_dir, "libTecoInferPlugin.so")
+        teco_infer_plugin_dest = os.path.join(current_path, "api", "tecoops", "libTecoInferPlugin.so")
+        shutil.copy2(teco_infer_plugin_lib, teco_infer_plugin_dest)
+        print(f"Copied libTecoInferPlugin.so to api/tecoops/libTecoInferPlugin.so")
+
+        # Clean build directory for second pass
+        if os.path.exists(teco_build_dir):
+            shutil.rmtree(teco_build_dir)
+        os.makedirs(teco_build_dir, exist_ok=True)
+
+        # Build second pass: WITH_TORCH=ON only (produces libteco_ops.so with torch link flags)
         cmake_cmd = [
             "cmake",
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + teco_lib_dir,
@@ -65,12 +107,12 @@ if with_torch == "ON":
             "-S", teco_source_dir,
             "-B", teco_build_dir
         ]
-        result = subprocess.run(cmake_cmd, capture_output=True, text=True)
+        result = subprocess.run(cmake_cmd, capture_output=True)
         if result.returncode != 0:
-            raise RuntimeError("CMake configure failed: " + result.stderr)
-        result = subprocess.run(["cmake", "--build", teco_build_dir], capture_output=True, text=True)
+            raise RuntimeError("CMake configure failed: " + result.stderr.decode(errors='replace'))
+        result = subprocess.run(["cmake", "--build", teco_build_dir], capture_output=True)
         if result.returncode != 0:
-            raise RuntimeError("CMake build failed: " + result.stderr)
+            raise RuntimeError("CMake build failed: " + result.stderr.decode(errors='replace'))
         print("libteco_ops.so built successfully!")
 
         teco_ops_lib = os.path.join(teco_lib_dir, "libteco_ops.so")

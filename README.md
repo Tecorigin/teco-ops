@@ -1,6 +1,6 @@
 # Teco-Ops
 
-Teco-Ops 算子开发项目，提供基于 SDAA C 编程模型的高性能算子实现、C++ 接口封装、Python API 绑定（PyTorch 扩展）及完整的测试框架。通过本项目，您可以高效地开发和优化自定义算子，将其封装为 C++/Python 接口并无缝集成到 PyTorch 中，同时利用内置测试框架全面验证算子的正确性与性能。
+Teco-Ops 算子开发项目，提供基于 SDAA C 编程模型的高性能算子实现、C++ 接口封装、Python API 绑定（PyTorch 扩展）、Plugin 自定义算子接口（Teco-Inference 推理框架）及完整的测试框架。通过本项目，您可以高效地开发和优化自定义算子，将其封装为 C++/Python 接口并无缝集成到 PyTorch 或Teco-Inference中，同时利用内置测试框架全面验证算子的正确性与性能。
 
 ## 代码架构
 
@@ -37,6 +37,15 @@ tecoops.flatten_rays(rays, N, M, res)
 
 详见 [Python API 接口说明](doc/README_PYTHON.md)。
 
+### Plugin 自定义算子接口
+
+Plugin 自定义算子接口基于 Teco-Inference 推理框架，支持通过 TVM Relay IR 注册自定义算子并在推理引擎中执行。适用于推理场景中的自定义算子需求。
+
+- **Plugin 算子实现**（`teco/plugin/`）：继承 `AbstractPluginOp` 基类，实现 `InferOutputShape` 和 `Enqueue` 方法，编译产物为 `libteco_ops_plugin.so` 和 `libTecoInferPlugin.so`
+- **Plugin 算子测试**（`plugin_test/`）：基于 ONNX + TVM Relay 的推理测试脚本
+
+详见 [Plugin 自定义算子接口说明](doc/README_PLUGIN.md)。
+
 ## 目录结构
 
 ```
@@ -57,6 +66,9 @@ Teco-Ops/
 │   │   ├── kernel/         #   设备端 kernel 实现（.scpp）
 │   │   │   └── flatten_rays/
 │   │   └── com/            #   数据类型、日志、状态码等
+│   ├── plugin/              # Plugin 自定义算子实现（基于 Teco-Inference）
+│   │   └── pluginFlattenRays/
+│   │       └── plugin_flatten_rays.cc
 │   └── CMakeLists.txt
 ├── cuda/                   # CUDA 算子实现（精度基线）
 ├── common/                 # 公共头文件和工具
@@ -79,10 +91,12 @@ Teco-Ops/
 │   ├── CMakeLists.txt
 │   └── build.sh
 ├── python_api_test/        # Python API 接口测试脚本
+├── plugin_test/            # Plugin 自定义算子推理测试脚本
 ├── examples/               # 示例脚本
 ├── doc/                    # 文档
 │   ├── README_OP.md        # 算子开发指南
 │   ├── README_PYTHON.md    # Python 接口说明
+│   ├── README_PLUGIN.md    # Plugin 自定义算子接口说明
 │   └── QA.md               # 常见问题解答
 ├── build.sh                # 算子库构建脚本
 ├── setup.py                # Python 绑定构建脚本
@@ -158,7 +172,25 @@ python python_api_test/test_flatten_rays.py
 
 **注意：** 使用 torch 扩展时，需先 `import torch` 再 `import tecoops`。
 
-### 步骤六：提交 PR
+### 步骤六：Plugin 自定义算子开发与自测
+
+如需在推理场景中使用自定义算子，可在 `teco/plugin/` 目录下开发 Plugin 算子，并在 `plugin_test/` 目录下编写测试脚本。详见 [Plugin 自定义算子接口说明](doc/README_PLUGIN.md)。
+
+```bash
+# 设置 TVM 路径环境变量
+export TECO_INFER_PLUGIN_UTIL_PATH=<tvm_package_path>
+
+# 构建（setup.py 自动执行两阶段构建）
+python setup.py build_ext --inplace
+
+# 测试前设置库路径（需包含 libteco_ops_plugin.so 和 libTecoInferPlugin.so 所在目录）
+export LD_LIBRARY_PATH=<lib_path>:${LD_LIBRARY_PATH}
+
+# 测试 Plugin 算子
+python plugin_test/test_plugin_flatten_rays.py
+```
+
+### 步骤七：提交 PR
 
 完成开发和自测后，提交 Pull Request。详细规范见 [算子提交规范](doc/PR.md)。
 
@@ -175,6 +207,7 @@ python python_api_test/test_flatten_rays.py
 - [算子开发指南](doc/README_OP.md) — 算子实现、测例编写及测试步骤
 - [算子设计文档](doc/op_docs/) — 各算子的设计文档
 - [Python 接口说明](doc/README_PYTHON.md) — Python API 使用指南
+- [Plugin 自定义算子接口说明](doc/README_PLUGIN.md) — Plugin 算子开发与推理使用指南
 - [常见问题](doc/QA.md) — 算子 proto 参数设置及测试框架说明
 
 ## License
