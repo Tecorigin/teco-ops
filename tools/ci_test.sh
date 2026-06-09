@@ -64,6 +64,20 @@ for op in "${OPS_ARRAY[@]}"; do
     fi
 done
 
+FAILED_STEP="运行 plugin api 测试"
+echo "======================================================"
+echo "run plugin api tests"
+export LD_LIBRARY_PATH=$(realpath ../api/tecoops):${LD_LIBRARY_PATH}
+cd ../plugin_test
+IFS=';' read -ra OPS_ARRAY <<< "$ops"
+for op in "${OPS_ARRAY[@]}"; do
+    if [ -f "test_plugin_${op}.py" ]; then
+        echo "Running plugin test for operator: ${op}"
+        python "test_plugin_${op}.py"
+        echo "test_plugin_${op}.py: $?"
+    fi
+done
+
 echo "======================================================"
 echo "测试成功"
 exit 0
