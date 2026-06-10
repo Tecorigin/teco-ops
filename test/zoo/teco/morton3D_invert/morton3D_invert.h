@@ -27,38 +27,33 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "ual/ops/flatten_rays/flatten_rays.hpp"
+#ifndef ZOO_TECO_MORTON3D_INVERT_MORTON3D_INVERT_H_  // NOLINT
+#define ZOO_TECO_MORTON3D_INVERT_MORTON3D_INVERT_H_
 
-#include "interface/common/convert.h"
-#include "interface/common/macro.h"
-#include "interface/include/builtin_type.h"
 #include "interface/include/tecoops.h"
-#include "ual/args/flatten_rays_args.h"
+#include "zoo/teco/executor.h"
 
-using tecoops::Convert;
-using tecoops::ual::args::FlattenRaysArgs;
-using tecoops::ual::args::FlattenRaysPatchArgs;
-using tecoops::ual::ops::FlattenRaysOp;
+namespace optest {
+class Morton3dInvertExecutor : public TecoExecutor {
+ public:
+    Morton3dInvertExecutor() {}
+    ~Morton3dInvertExecutor() {}
 
-tecoopsStatus_t tecoopsFlattenRays(tecoopsHandle_t handle, const int* rays, uint32_t N, uint32_t M,
-                                   int* res, tecoopsAlgo_t algo) {
-    if (handle == nullptr) {
-        return TECOOPS_STATUS_NOT_INITIALIZED;
-    }
+    void paramCheck();
+    void paramParse();
+    void paramGeneration();
+    void compute();
+    void cpuCompute();
+    void gpuCompute();
+    int64_t getTheoryOps() override;
+    int64_t getTheoryIoSize() override;
+    void destroy();
 
-    FlattenRaysArgs arg;
-    arg.spe_num = handle->spe_num;
-    arg.rays = rays;
-    arg.N = N;
-    arg.M = M;
-    arg.res = res;
+ private:
+    void *indices, *coords;
+    uint32_t N;
+};
 
-    FlattenRaysPatchArgs patch_arg;
-    patch_arg.atargs = &arg;
-    patch_arg.data_type = tecoops::ual::common::UAL_DTYPE_INT32;
-    patch_arg.algo = Convert::toUALAlgoType(algo);
+}  // namespace optest
 
-    RUN_OP(FlattenRaysOp, arg, patch_arg, handle);
-
-    return TECOOPS_STATUS_SUCCESS;
-}
+#endif  // ZOO_TECO_MORTON3D_INVERT_MORTON3D_INVERT_H_

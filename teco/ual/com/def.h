@@ -32,6 +32,14 @@
 
 #include "ual/com/status.h"
 
+#ifndef PAD_UP
+#define PAD_UP(x, a) (((x + a - 1) / a) * a)
+#endif
+
+#ifndef PAD_DOWN
+#define PAD_DOWN(x, a) ((x / a) * a)
+#endif
+
 namespace tecoops {
 namespace ual {
 namespace common {

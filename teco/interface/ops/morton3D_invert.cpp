@@ -27,38 +27,36 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "ual/ops/flatten_rays/flatten_rays.hpp"
-
+#include "ual/ops/morton3D_invert/morton3D_invert.hpp"
 #include "interface/common/convert.h"
 #include "interface/common/macro.h"
 #include "interface/include/builtin_type.h"
 #include "interface/include/tecoops.h"
-#include "ual/args/flatten_rays_args.h"
+#include "ual/args/morton3D_invert_args.h"
 
 using tecoops::Convert;
-using tecoops::ual::args::FlattenRaysArgs;
-using tecoops::ual::args::FlattenRaysPatchArgs;
-using tecoops::ual::ops::FlattenRaysOp;
+using tecoops::ual::args::Morton3DInvertArgs;
+using tecoops::ual::args::Morton3DInvertPatchArgs;
+using tecoops::ual::ops::Morton3DInvertOp;
 
-tecoopsStatus_t tecoopsFlattenRays(tecoopsHandle_t handle, const int* rays, uint32_t N, uint32_t M,
-                                   int* res, tecoopsAlgo_t algo) {
+tecoopsStatus_t tecoopsMorton3DInvert(tecoopsHandle_t handle, const int* indices, uint32_t N,
+                                      int *coords) {
     if (handle == nullptr) {
         return TECOOPS_STATUS_NOT_INITIALIZED;
     }
 
-    FlattenRaysArgs arg;
+    Morton3DInvertArgs arg;
     arg.spe_num = handle->spe_num;
-    arg.rays = rays;
+    arg.spm_size = handle->spm_size;
+    arg.indices = indices;
     arg.N = N;
-    arg.M = M;
-    arg.res = res;
+    arg.coords = coords;
 
-    FlattenRaysPatchArgs patch_arg;
-    patch_arg.atargs = &arg;
+    Morton3DInvertPatchArgs patch_arg;
+    patch_arg.miargs = &arg;
     patch_arg.data_type = tecoops::ual::common::UAL_DTYPE_INT32;
-    patch_arg.algo = Convert::toUALAlgoType(algo);
 
-    RUN_OP(FlattenRaysOp, arg, patch_arg, handle);
+    RUN_OP(Morton3DInvertOp, arg, patch_arg, handle);
 
     return TECOOPS_STATUS_SUCCESS;
 }
