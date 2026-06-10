@@ -130,6 +130,9 @@ tecoopsStatus_t tecoopsReduceVariance(const tecoopsHandle_t handle, int axis, in
                                       const tecoopsTensorDescriptor_t xDesc, const void* x,
                                       const tecoopsTensorDescriptor_t yDesc, void* y);
 
+tecoopsStatus_t tecoopsMorton3DInvert(tecoopsHandle_t handle, const int* indices, uint32_t N,
+                                      int *coords);
+
 #ifdef __cplusplus
 }
 #endif

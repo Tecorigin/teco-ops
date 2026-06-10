@@ -1,0 +1,87 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/morton3D_invert/morton3D_invert.h"
+#include "ual/kernel/macro.h"
+// #include "teco_kernel_context.h"
+
+using namespace tecoops::ual::args;
+
+
+__device__ static __always_inline uint32_t morton3D_invert(uint32_t x) {
+  x = x & 0x49249249;
+  x = (x | (x >> 2)) & 0xc30c30c3;
+  x = (x | (x >> 4)) & 0x0f00f00f;
+  x = (x | (x >> 8)) & 0xff0000ff;
+  x = (x | (x >> 16)) & 0x0000ffff;
+  return x;
+}
+
+// indices: int32, [N]
+// coords: int32, [N, 3]
+__global__ void tecoKernelMorton3DInvertInt(Morton3DInvertArgs arg) {
+    const int *indices = arg.indices;
+    uint32_t N = arg.N;
+    int *coords = arg.coords;
+    int spe_num = arg.spe_num;
+    int spm_size = arg.spm_size;
+
+    size_t num_per_spe = (N + spe_num - 1) / spe_num;
+    size_t start = threadIdx * num_per_spe;
+    size_t end = MIN(start + num_per_spe, (size_t)N);
+    int tmp_size = 1024;  // actual: 16 * 4 * 3 * sizeof(int);
+    const int num_per_loop = PAD_DOWN(((spm_size - tmp_size) / (8 * sizeof(int))), 64);
+    int *tmp = (int*)rt_spm_malloc(tmp_size + num_per_loop * sizeof(int) * 4);
+    int *src_spm = tmp + 1024 / sizeof(int);
+    int *dst_spm = src_spm + num_per_loop;
+    const int *src_hbm = indices + start;
+    int *dst_hbm = coords + start * 3;
+
+    for (size_t n = start; n < end; n += num_per_loop) {
+        int num = MIN(num_per_loop, end - n);
+        // load data from global memory to spm
+        memcpy_async(src_spm, src_hbm, num * sizeof(int), 0, {0, 0},
+                     MemcpyGlobalToSpm);
+        memcpy_wait();
+        // compute
+        for (int i = 0; i < num; i++) {
+            const int ind = src_spm[i];
+            dst_spm[i * 3 + 0] = morton3D_invert(ind >> 0);
+            dst_spm[i * 3 + 1] = morton3D_invert(ind >> 1);
+            dst_spm[i * 3 + 2] = morton3D_invert(ind >> 2);
+        }
+        // store data from spm to global memory
+        memcpy_async(dst_hbm, dst_spm, num * sizeof(int) * 3, 0, {0, 0}, MemcpySpmToGlobal);
+        dst_hbm += 3 * num_per_loop;
+        src_hbm += num_per_loop;
+        memcpy_wait();
+    }
+    rt_spm_free(tmp);
+}
