@@ -210,6 +210,7 @@ python plugin_test/test_plugin_flatten_rays.py
 - [Python 接口说明](doc/README_PYTHON.md) — Python API 使用指南
 - [Plugin 自定义算子接口说明](doc/README_PLUGIN.md) — Plugin 算子开发与推理使用指南
 - [常见问题](doc/QA.md) — 算子 proto 参数设置及测试框架说明
+- [算子硬件知识](doc/teco-ops-hardware.md) — 算子开发相关的硬件知识
 - [Debug 手册](doc/README_DEBUG.md) — SDAAC 程序调试手段及精度问题排查
 
 ## License
