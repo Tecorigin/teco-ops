@@ -1,3 +1,32 @@
+// BSD 3-Clause License
+//
+// Copyright (c) 2024, Tecorigin Co., Ltd.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from
+//    this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 #include <torch/extension.h>
 #include <torch_sdaa/sdaa_extension.h>
 
@@ -21,6 +50,55 @@ void flatten_rays_torch(torch::Tensor rays, uint32_t N, uint32_t M, torch::Tenso
                        TECOOPS_ALGO_0);
 }
 
+void morton3D_invert_torch(torch::Tensor indices, uint32_t N, torch::Tensor coords) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsMorton3DInvert(handle,
+                          indices.data_ptr<int>(),
+                          N,
+                          coords.data_ptr<int>());
+}
+
+void reshape_and_cache_torch(
+    torch::Tensor key, torch::Tensor value,
+    torch::Tensor slot_mapping,
+    torch::Tensor key_cache, torch::Tensor value_cache) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    int num_tokens = key.size(0);
+    int num_kv_heads = key.size(1);
+    int head_size = key.size(2);
+    int num_blocks = key_cache.size(0);
+    int block_size = key_cache.size(2);
+
+    tecoopsReshapeAndCache(
+        handle,
+        key.data_ptr(), value.data_ptr(),
+        slot_mapping.data_ptr<int64_t>(),
+        key_cache.data_ptr(), value_cache.data_ptr(),
+        num_tokens, num_kv_heads, head_size,
+        num_blocks, block_size);
+}
+
+void rms_norm_torch(
+    torch::Tensor input, torch::Tensor weight,
+    c10::optional<torch::Tensor> residual,
+    torch::Tensor output, c10::optional<torch::Tensor> residual_out,
+    double eps) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    int num_tokens = input.size(0);
+    int hidden_size = input.size(1);
+
+    const void *residual_ptr = residual.has_value() ? residual.value().data_ptr() : nullptr;
+    void *res_out_ptr = residual_out.has_value() ? residual_out.value().data_ptr() : nullptr;
+
+    tecoopsRmsNorm(handle,
+                   input.data_ptr(), weight.data_ptr(),
+                   residual_ptr, output.data_ptr(), res_out_ptr,
+                   num_tokens, hidden_size, static_cast<float>(eps));
+}
+
 PYBIND11_MODULE(_torch_ext, m) {
     m.def("flatten_rays", &flatten_rays_torch, "flatten_rays (SDAA)");
+    m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
+    m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
+    m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
 }
