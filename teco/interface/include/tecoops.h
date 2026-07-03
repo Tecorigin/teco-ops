@@ -126,6 +126,14 @@ tecoopsStatus_t tecoopsFlattenRays(tecoopsHandle_t handle, const int* rays, uint
 
 tecoopsStatus_t tecoopsMemset(tecoopsHandle_t handle, void* x, const int value, size_t size);
 
+tecoopsStatus_t tecoopsReshapeAndCache(
+    tecoopsHandle_t handle,
+    const void *key, const void *value,
+    const int64_t *slot_mapping,
+    void *key_cache, void *value_cache,
+    int num_tokens, int num_kv_heads, int head_size,
+    int num_blocks, int block_size);
+
 tecoopsStatus_t tecoopsReduceVariance(const tecoopsHandle_t handle, int axis, int correction,
                                       const tecoopsTensorDescriptor_t xDesc, const void* x,
                                       const tecoopsTensorDescriptor_t yDesc, void* y);

@@ -58,6 +58,26 @@ void morton3D_invert_torch(torch::Tensor indices, uint32_t N, torch::Tensor coor
                           coords.data_ptr<int>());
 }
 
+void reshape_and_cache_torch(
+    torch::Tensor key, torch::Tensor value,
+    torch::Tensor slot_mapping,
+    torch::Tensor key_cache, torch::Tensor value_cache) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    int num_tokens = key.size(0);
+    int num_kv_heads = key.size(1);
+    int head_size = key.size(2);
+    int num_blocks = key_cache.size(0);
+    int block_size = key_cache.size(2);
+
+    tecoopsReshapeAndCache(
+        handle,
+        key.data_ptr(), value.data_ptr(),
+        slot_mapping.data_ptr<int64_t>(),
+        key_cache.data_ptr(), value_cache.data_ptr(),
+        num_tokens, num_kv_heads, head_size,
+        num_blocks, block_size);
+}
+
 void rms_norm_torch(
     torch::Tensor input, torch::Tensor weight,
     c10::optional<torch::Tensor> residual,
@@ -79,5 +99,6 @@ void rms_norm_torch(
 PYBIND11_MODULE(_torch_ext, m) {
     m.def("flatten_rays", &flatten_rays_torch, "flatten_rays (SDAA)");
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
+    m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
 }

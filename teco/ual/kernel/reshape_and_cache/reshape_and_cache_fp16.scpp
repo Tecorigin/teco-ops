@@ -1,0 +1,96 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+// reshape_and_cache: 将 key/value 按 slot_mapping 写入 paged KV cache
+//
+// 输入: key   [num_tokens, num_kv_heads, head_size] (HBM)
+//       value [num_tokens, num_kv_heads, head_size] (HBM)
+// 输出: key_cache   [num_blocks, num_kv_heads, block_size, head_size]
+//       value_cache [num_blocks, num_kv_heads, block_size, head_size]
+//
+// 实现: 32 SPE 按 token 维度并行，逐 head 做 HBM→HBM 阻塞式 memcpy
+//   - 不经过 SPM，直接用 memcpy 的 Global→Global 方向
+//   - reshape 通过每个 head 写入时的 stride offset 实现
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/reshape_and_cache/reshape_and_cache.h"
+
+using namespace tecoops::ual::args;  // NOLINT
+using namespace sdaa;  // NOLINT
+
+__global__ void teco_slave_reshape_and_cache_fp16(ReshapeAndCacheArgs args) {
+    const int tid = threadIdx;
+    constexpr int CORE_NUM = 32;
+
+    int H = args.num_kv_heads;
+    int D = args.size_per_head;
+    int T = args.num_tokens;
+    int block_size = args.block_size;
+
+    int block_stride  = args.block_stride;
+    int head_stride   = args.head_stride;
+    int entry_stride  = args.entry_stride;
+    int key_stride    = args.key_stride;
+    int value_stride  = args.value_stride;
+
+    const half *key   = (const half *)(args.key);
+    const half *value = (const half *)(args.value);
+    const int64_t *slot_mapping = args.slot_mapping;
+    half *key_cache   = (half *)(args.key_cache);
+    half *value_cache = (half *)(args.value_cache);
+
+    int head_bytes = D * sizeof(half);
+
+    for (int t = tid; t < T; t += CORE_NUM) {
+        int64_t slot = slot_mapping[t];
+        if (slot < 0) continue;
+
+        int block_id  = slot / block_size;
+        int block_off = slot % block_size;
+
+        const half *src_key   = key   + t * key_stride / sizeof(half);
+        const half *src_value = value + t * value_stride / sizeof(half);
+
+        char *cache_key_base = (char *)key_cache
+            + block_id * block_stride + block_off * entry_stride;
+        char *cache_value_base = (char *)value_cache
+            + block_id * block_stride + block_off * entry_stride;
+
+        for (int h = 0; h < H; h++) {
+            // HBM → HBM 直传，阻塞式 memcpy
+            memcpy(cache_key_base + h * head_stride,
+                   (char *)src_key + h * head_bytes,
+                   head_bytes);
+
+            memcpy(cache_value_base + h * head_stride,
+                   (char *)src_value + h * head_bytes,
+                   head_bytes);
+        }
+    }
+}
