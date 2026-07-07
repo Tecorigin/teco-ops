@@ -5,8 +5,10 @@ package testpt;
 import "tensor.proto";
 import "tecokernel/memset.proto";
 import "tecokernel/reduce_variance.proto";
+import "tecokernel/rms_norm.proto";
 
 message TecokernelParam {
     optional MemsetParam memset_param                            = 1;
     optional ReduceVarianceParam reduce_variance_param           = 2;
+    optional RmsNormParam rms_norm_param                         = 3;
 }

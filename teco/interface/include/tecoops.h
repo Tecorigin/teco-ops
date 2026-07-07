@@ -133,6 +133,17 @@ tecoopsStatus_t tecoopsReduceVariance(const tecoopsHandle_t handle, int axis, in
 tecoopsStatus_t tecoopsMorton3DInvert(tecoopsHandle_t handle, const int* indices, uint32_t N,
                                       int *coords);
 
+tecoopsStatus_t tecoopsRmsNorm(
+    tecoopsHandle_t handle,
+    const void *input,
+    const void *weight,
+    const void *residual,
+    void *output,
+    void *residual_out,
+    int num_tokens,
+    int hidden_size,
+    float eps);
+
 #ifdef __cplusplus
 }
 #endif
