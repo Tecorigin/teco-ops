@@ -58,7 +58,26 @@ void morton3D_invert_torch(torch::Tensor indices, uint32_t N, torch::Tensor coor
                           coords.data_ptr<int>());
 }
 
+void rms_norm_torch(
+    torch::Tensor input, torch::Tensor weight,
+    c10::optional<torch::Tensor> residual,
+    torch::Tensor output, c10::optional<torch::Tensor> residual_out,
+    double eps) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    int num_tokens = input.size(0);
+    int hidden_size = input.size(1);
+
+    const void *residual_ptr = residual.has_value() ? residual.value().data_ptr() : nullptr;
+    void *res_out_ptr = residual_out.has_value() ? residual_out.value().data_ptr() : nullptr;
+
+    tecoopsRmsNorm(handle,
+                   input.data_ptr(), weight.data_ptr(),
+                   residual_ptr, output.data_ptr(), res_out_ptr,
+                   num_tokens, hidden_size, static_cast<float>(eps));
+}
+
 PYBIND11_MODULE(_torch_ext, m) {
     m.def("flatten_rays", &flatten_rays_torch, "flatten_rays (SDAA)");
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
+    m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
 }

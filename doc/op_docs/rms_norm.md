@@ -32,7 +32,7 @@ $$
 - $x$：输入张量，形状 `[num_tokens, hidden_size]`
 - $w$：权重张量，形状 `[hidden_size]`
 - $r$：残差输入（可选），形状 `[num_tokens, hidden_size]`
-- $\epsilon$：数值稳定性参数，默认 `1e-5`
+- $\epsilon$：数值稳定性参数，典型值 `1e-5` 或 `1e-6`
 - $y$：输出张量，形状 `[num_tokens, hidden_size]`
 - $r_{out}$：残差输出（可选，当有 residual 时输出 $x'$），形状 `[num_tokens, hidden_size]`
 
@@ -114,10 +114,16 @@ SPM 布局:
 
 ### 性能数据
 
-| 测例                            | 硬件时间 (us) | IoBandWidth (GB/s) | ComputeForce (TFLOPS) |
-| ------------------------------- | ------------- | ------------------ | --------------------- |
-| case_0（纯 RMSNorm, 64×4096）  | 122.6         | 8.62               | 0.0086                |
-| case_1（RMSNorm+Add, 64×4096） | 173.7         | 12.12              | 0.0075                |
+| 测例 | 配置 | eps | 状态 |
+|---|---|---|---|
+| case_0 | 64×4096, 纯 norm | 1e-6 | OK |
+| case_1 | 64×4096, add norm | 1e-6 | OK |
+| case_2 | 64×2048, 纯 norm | 1e-5 | OK |
+| case_3 | 64×2048, add norm | 1e-5 | OK |
+| case_4 | 64×1536, 纯 norm | 1e-6 | OK |
+| case_5 | 64×1536, add norm | 1e-6 | OK |
+| case_6 | 64×128, 纯 norm | 1e-6 | OK |
+| case_7 | 64×128, 纯 norm | 1e-5 | OK |
 
 ## 分支派发
 
@@ -155,8 +161,14 @@ test/
     ├── rms_norm.h                     # 测试类声明
     ├── rms_norm.cpp                   # 测试实现 + CPU baseline
     └── test_case/
-        ├── case_0.prototxt            # 纯 RMSNorm 测例
-        └── case_1.prototxt            # RMSNorm+Add 测例
+        ├── case_0.prototxt            # 64×4096, 纯 norm, eps=1e-6
+        ├── case_1.prototxt            # 64×4096, add norm, eps=1e-6
+        ├── case_2.prototxt            # 64×2048, 纯 norm, eps=1e-5
+        ├── case_3.prototxt            # 64×2048, add norm, eps=1e-5
+        ├── case_4.prototxt            # 64×1536, 纯 norm, eps=1e-6
+        ├── case_5.prototxt            # 64×1536, add norm, eps=1e-6
+        ├── case_6.prototxt            # 64×128, 纯 norm, eps=1e-6
+        └── case_7.prototxt            # 64×128, 纯 norm, eps=1e-5
 api/
 ├── torch_ext.cpp                      # PyTorch 绑定
 └── tecoops/__init__.py                # Python 导出
@@ -176,10 +188,10 @@ import tecoops
 x = torch.randn(64, 4096, dtype=torch.half, device='sdaa')
 w = torch.randn(4096, dtype=torch.half, device='sdaa')
 out = torch.empty(64, 4096, dtype=torch.half, device='sdaa')
-tecoops.rms_norm(x, w, None, out, None, 1e-5)
+tecoops.rms_norm(x, w, None, out, None, eps=1e-6)
 
 # RMSNorm + residual add
 residual = torch.randn(64, 4096, dtype=torch.half, device='sdaa')
 res_out = torch.empty(64, 4096, dtype=torch.half, device='sdaa')
-tecoops.rms_norm(x, w, residual, out, res_out, 1e-5)
+tecoops.rms_norm(x, w, residual, out, res_out, eps=1e-6)
 ```
