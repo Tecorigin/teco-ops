@@ -45,5 +45,7 @@ output {
 }
 
 tecokernel_param: {
-  rms_norm_param: {}
+  rms_norm_param: {
+    eps: 1e-6
+  }
 }

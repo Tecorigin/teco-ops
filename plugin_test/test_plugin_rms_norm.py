@@ -115,76 +115,92 @@ def rms_norm_add_ref(x, residual, weight, eps=1e-5):
 
 
 def test_plugin_rms_norm_pure():
-    """纯 RMSNorm"""
+    """纯 RMSNorm（多维度）"""
     print("=" * 60)
     print("Test: plugin_rms_norm (pure)")
+    num_tokens = 64
 
-    num_tokens, hidden_size = 64, 4096
-    eps = 1e-5
+    norm_cases = [
+        (128,  1e-6),
+        (128,  1e-5),
+        (1536, 1e-6),
+        (2048, 1e-5),
+        (4096, 1e-6),
+    ]
 
-    x = np.random.randn(num_tokens, hidden_size).astype(np.float16)
-    w = np.random.randn(hidden_size).astype(np.float16)
+    all_passed = True
+    for hidden_size, eps in norm_cases:
+        x = np.random.randn(num_tokens, hidden_size).astype(np.float16)
+        w = np.random.randn(hidden_size).astype(np.float16)
 
-    expected = rms_norm_ref(x, w, eps)
+        expected = rms_norm_ref(x, w, eps)
 
-    model = create_onnx_model_pure((num_tokens, hidden_size), eps)
-    mod, _ = tvm.relay.frontend.from_onnx(model, {
-        "input": (num_tokens, hidden_size),
-        "weight": (hidden_size,),
-    })
+        model = create_onnx_model_pure((num_tokens, hidden_size), eps)
+        mod, _ = tvm.relay.frontend.from_onnx(model, {
+            "input": (num_tokens, hidden_size),
+            "weight": (hidden_size,),
+        })
 
-    fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
-    engine = tecoinference.Engine(fbs_model)
-    ctx = engine.create_context()
-    ctx.set_input(0, x)
-    ctx.set_input(1, w)
-    ctx.executor_run()
-    out = ctx.get_output(0)
+        fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
+        engine = tecoinference.Engine(fbs_model)
+        ctx = engine.create_context()
+        ctx.set_input(0, x)
+        ctx.set_input(1, w)
+        ctx.executor_run()
+        out = ctx.get_output(0)
 
-    max_err = np.abs(out.astype(np.float32) - expected.astype(np.float32)).max()
-    passed = max_err < 0.01
-    print(f"  max_error = {max_err:.6e}  {'PASSED' if passed else 'FAILED'}")
-    return passed
+        max_err = np.abs(out.astype(np.float32) - expected.astype(np.float32)).max()
+        passed = max_err < 0.01
+        all_passed = all_passed and passed
+        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  max_error = {max_err:.6e}  {'PASSED' if passed else 'FAILED'}")
+
+    return all_passed
 
 
 def test_plugin_rms_norm_add():
-    """RMSNorm + residual add"""
+    """RMSNorm + residual add（多维度）"""
     print("=" * 60)
     print("Test: plugin_rms_norm (add)")
+    num_tokens = 64
 
-    num_tokens, hidden_size = 64, 4096
-    eps = 1e-5
+    add_cases = [
+        (1536, 1e-6),
+        (2048, 1e-5),
+        (4096, 1e-6),
+    ]
 
-    x = np.random.randn(num_tokens, hidden_size).astype(np.float16)
-    r = np.random.randn(num_tokens, hidden_size).astype(np.float16)
-    w = np.random.randn(hidden_size).astype(np.float16)
+    all_passed = True
+    for hidden_size, eps in add_cases:
+        x = np.random.randn(num_tokens, hidden_size).astype(np.float16)
+        r = np.random.randn(num_tokens, hidden_size).astype(np.float16)
+        w = np.random.randn(hidden_size).astype(np.float16)
 
-    expected_out, expected_res = rms_norm_add_ref(x, r, w, eps)
+        expected_out, expected_res = rms_norm_add_ref(x, r, w, eps)
 
-    model = create_onnx_model_add((num_tokens, hidden_size), eps)
-    mod, _ = tvm.relay.frontend.from_onnx(model, {
-        "input": (num_tokens, hidden_size),
-        "weight": (hidden_size,),
-        "residual": (num_tokens, hidden_size),
-    })
+        model = create_onnx_model_add((num_tokens, hidden_size), eps)
+        mod, _ = tvm.relay.frontend.from_onnx(model, {
+            "input": (num_tokens, hidden_size),
+            "weight": (hidden_size,),
+            "residual": (num_tokens, hidden_size),
+        })
 
-    fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
-    engine = tecoinference.Engine(fbs_model)
-    ctx = engine.create_context()
-    ctx.set_input(0, x)
-    ctx.set_input(1, w)
-    ctx.set_input(2, r)
-    ctx.executor_run()
-    out = ctx.get_output(0)
-    res_out = ctx.get_output(1)
+        fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
+        engine = tecoinference.Engine(fbs_model)
+        ctx = engine.create_context()
+        ctx.set_input(0, x)
+        ctx.set_input(1, w)
+        ctx.set_input(2, r)
+        ctx.executor_run()
+        out = ctx.get_output(0)
+        res_out = ctx.get_output(1)
 
-    max_err_out = np.abs(out.astype(np.float32) - expected_out.astype(np.float32)).max()
-    max_err_res = np.abs(res_out.astype(np.float32) - expected_res.astype(np.float32)).max()
-    passed = max_err_out < 0.01 and max_err_res < 0.01
-    print(f"  output       max_error = {max_err_out:.6e}")
-    print(f"  residual_out max_error = {max_err_res:.6e}")
-    print(f"  {'PASSED' if passed else 'FAILED'}")
-    return passed
+        max_err_out = np.abs(out.astype(np.float32) - expected_out.astype(np.float32)).max()
+        max_err_res = np.abs(res_out.astype(np.float32) - expected_res.astype(np.float32)).max()
+        passed = max_err_out < 0.01 and max_err_res < 0.01
+        all_passed = all_passed and passed
+        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  out_max_err = {max_err_out:.6e}  res_max_err = {max_err_res:.6e}  {'PASSED' if passed else 'FAILED'}")
+
+    return all_passed
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ input {
   id: "input"
   shape: {
     dims: 64
-    dims: 4096
+    dims: 2048
   }
   layout: LAYOUT_NCHW
   dtype: DTYPE_HALF
@@ -20,7 +20,7 @@ input {
 input {
   id: "weight"
   shape: {
-    dims: 4096
+    dims: 2048
   }
   layout: LAYOUT_ARRAY
   dtype: DTYPE_HALF
@@ -37,7 +37,7 @@ input {
   id: "residual"
   shape: {
     dims: 64
-    dims: 4096
+    dims: 2048
   }
   layout: LAYOUT_NCHW
   dtype: DTYPE_HALF
@@ -54,7 +54,7 @@ output {
   id: "output"
   shape: {
     dims: 64
-    dims: 4096
+    dims: 2048
   }
   layout: LAYOUT_NCHW
   dtype: DTYPE_HALF
@@ -65,7 +65,7 @@ output {
   id: "residual_out"
   shape: {
     dims: 64
-    dims: 4096
+    dims: 2048
   }
   layout: LAYOUT_NCHW
   dtype: DTYPE_HALF
@@ -74,6 +74,6 @@ output {
 
 tecokernel_param: {
   rms_norm_param: {
-    eps: 1e-6
+    eps: 1e-5
   }
 }

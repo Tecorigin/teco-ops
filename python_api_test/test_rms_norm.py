@@ -42,66 +42,88 @@ def rms_norm_add_ref(x, residual, weight, eps=1e-5):
     return out, x_add.half()
 
 
-def test_rms_norm():
-    """纯 RMSNorm 测试"""
-    print("=" * 60)
-    print("Test: RMSNorm (pure)")
-    
-    num_tokens, hidden_size = 64, 4096
-    eps = 1e-5
-    
+def _test_rms_norm_one(num_tokens, hidden_size, eps=1e-5):
+    """单个纯 RMSNorm 测试"""
     x_cpu = torch.randn(num_tokens, hidden_size, dtype=torch.half)
     w_cpu = torch.randn(hidden_size, dtype=torch.half)
-    
-    # SDAA tensors
+
     x = x_cpu.to("sdaa")
     weight = w_cpu.to("sdaa")
     out = torch.empty(num_tokens, hidden_size, dtype=torch.half, device="sdaa")
-    
-    # SDAA compute
+
     tecoops.rms_norm(x, weight, None, out, None, eps)
-    
-    # CPU reference
+
     out_ref = rms_norm_ref(x_cpu, w_cpu, eps)
-    
     max_err = (out.cpu().float() - out_ref.float()).abs().max().item()
-    passed = max_err < 5e-3
-    print(f"  max_error = {max_err:.6e}  {'PASSED' if passed else 'FAILED'}")
-    return passed
+    return max_err
 
 
-def test_rms_norm_add():
-    """RMSNorm + residual add 测试"""
-    print("=" * 60)
-    print("Test: RMSNorm + residual add")
-    
-    num_tokens, hidden_size = 64, 4096
-    eps = 1e-5
-    
+def _test_rms_norm_add_one(num_tokens, hidden_size, eps=1e-5):
+    """单个 RMSNorm + residual add 测试"""
     x_cpu = torch.randn(num_tokens, hidden_size, dtype=torch.half)
     r_cpu = torch.randn(num_tokens, hidden_size, dtype=torch.half)
     w_cpu = torch.randn(hidden_size, dtype=torch.half)
-    
-    # SDAA tensors
+
     x = x_cpu.to("sdaa")
     residual = r_cpu.to("sdaa")
     weight = w_cpu.to("sdaa")
     out = torch.empty(num_tokens, hidden_size, dtype=torch.half, device="sdaa")
     residual_out = torch.empty(num_tokens, hidden_size, dtype=torch.half, device="sdaa")
-    
-    # SDAA compute
+
     tecoops.rms_norm(x, weight, residual, out, residual_out, eps)
-    
-    # CPU reference
+
     out_ref, res_out_ref = rms_norm_add_ref(x_cpu, r_cpu, w_cpu, eps)
-    
     max_err_out = (out.cpu().float() - out_ref.float()).abs().max().item()
     max_err_res = (residual_out.cpu().float() - res_out_ref.float()).abs().max().item()
-    passed = max_err_out < 1e-2 and max_err_res < 1e-2
-    print(f"  output       max_error = {max_err_out:.6e}")
-    print(f"  residual_out max_error = {max_err_res:.6e}")
-    print(f"  {'PASSED' if passed else 'FAILED'}")
-    return passed
+    return max_err_out, max_err_res
+
+
+def test_rms_norm():
+    """纯 RMSNorm 测试（多维度）"""
+    print("=" * 60)
+    print("Test: RMSNorm (pure)")
+    num_tokens = 64
+
+    # (hidden_size, eps) 配对
+    norm_cases = [
+        (128,  1e-6),
+        (128,  1e-5),
+        (1536, 1e-6),
+        (2048, 1e-5),
+        (4096, 1e-6),
+    ]
+
+    all_passed = True
+    for hidden_size, eps in norm_cases:
+        max_err = _test_rms_norm_one(num_tokens, hidden_size, eps)
+        passed = max_err < 5e-3
+        all_passed = all_passed and passed
+        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  max_error = {max_err:.6e}  {'PASSED' if passed else 'FAILED'}")
+
+    return all_passed
+
+
+def test_rms_norm_add():
+    """RMSNorm + residual add 测试（多维度）"""
+    print("=" * 60)
+    print("Test: RMSNorm + residual add")
+    num_tokens = 64
+
+    # (hidden_size, eps) 配对
+    add_cases = [
+        (1536, 1e-6),
+        (2048, 1e-5),
+        (4096, 1e-6),
+    ]
+
+    all_passed = True
+    for hidden_size, eps in add_cases:
+        max_err_out, max_err_res = _test_rms_norm_add_one(num_tokens, hidden_size, eps)
+        passed = max_err_out < 1e-2 and max_err_res < 1e-2
+        all_passed = all_passed and passed
+        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  out_max_err = {max_err_out:.6e}  res_max_err = {max_err_res:.6e}  {'PASSED' if passed else 'FAILED'}")
+
+    return all_passed
 
 
 if __name__ == "__main__":
