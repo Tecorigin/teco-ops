@@ -19,6 +19,10 @@ done
 # 检查是否包含特定目标
 if [[ " ${BUILD_TARGETS[*]} " =~ " teco " ]]; then
     echo "构建teco"
+    # thirdparty
+    cd ..
+    python3 tools/deps.py
+    cd build
     rm -rf ./teco && mkdir teco
     pushd ./teco
         cmake ../../teco/

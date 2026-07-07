@@ -79,7 +79,7 @@ list(APPEND SRC_ALL
     ${SRC_UAL_OPS}
     ${SRC_UAL_KERNEL})
 
-set(complie_options -O3 -msimd -mslave -fPIC -flto -x sdaa -std=c++17)
+set(complie_options -O3 -msimd -mslave -fPIC -flto -x sdaa -std=c++17 --sdaa-device-lib=${OPS_DIR}/../thirdparty/teco-hal/lib/teco_hal.bc)
 add_definitions(-DUSE_TECO)
 
 add_library(ops_objs OBJECT ${SRC_ALL})
@@ -88,6 +88,7 @@ set_target_properties(ops_objs PROPERTIES LINKER_LANGUAGE CXX)
 target_compile_options(ops_objs PRIVATE ${complie_options})
 target_include_directories(ops_objs PRIVATE "${OPS_DIR}/../common")
 target_include_directories(ops_objs PRIVATE "${OPS_DIR}/")
+target_include_directories(ops_objs PRIVATE "${OPS_DIR}/../thirdparty/teco-hal/include")
 
 if(WITH_TORCH)
     set(TORCH_LINK_FLAGS "-L${TORCH_LIB_DIR} -ltorch -ltorch_cpu -lc10")
