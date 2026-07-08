@@ -1,0 +1,79 @@
+op_name: "rms_norm"
+
+input {
+  id: "input"
+  shape: {
+    dims: 64
+    dims: 1536
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 42
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "weight"
+  shape: {
+    dims: 1536
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 43
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "residual"
+  shape: {
+    dims: 64
+    dims: 1536
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 44
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+output {
+  id: "output"
+  shape: {
+    dims: 64
+    dims: 1536
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+output {
+  id: "residual_out"
+  shape: {
+    dims: 64
+    dims: 1536
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+tecokernel_param: {
+  rms_norm_param: {
+    eps: 1e-6
+  }
+}

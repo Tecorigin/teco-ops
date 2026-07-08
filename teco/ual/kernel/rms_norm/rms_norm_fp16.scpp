@@ -1,0 +1,235 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+// rms_norm: RMS Normalization + optional residual add
+// 数据搬运: memcpy_async + memcpy_wait + MemcpyHandle (双缓冲流水)
+// 多核划分: Hal Tile R1C32_CR
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/rms_norm/rms_norm.h"
+
+#include "teco_hal_tensor.hpp"
+#include "teco_hal_tile.hpp"
+
+using namespace tecoops::ual::args;  // NOLINT
+using namespace teco::hal;            // NOLINT
+using namespace sdaa;                 // NOLINT
+
+// 双缓冲宏 (参考 reduce_variance_axis_right_float.scpp)
+#define CDBUF(x) (buf_dbflag == 0 ? x##0 : x##1)
+#define ADBUF(x) (buf_dbflag == 0 ? x##1 : x##0)
+#define EXDBF    buf_dbflag = 1 - buf_dbflag
+
+// ================================================================
+// Kernel 0: 纯 RMSNorm (双缓冲流水 + MemcpyHandle)
+// ================================================================
+__global__ void teco_slave_rms_norm_fp16(RmsNormArgs args) {
+    const int N = args.num_tokens;
+    const int D = args.hidden_size;
+    const float eps = args.eps;
+
+    half *input_hbm  = static_cast<half *>(const_cast<void *>(args.input));
+    half *weight_hbm = static_cast<half *>(const_cast<void *>(args.weight));
+    half *output_hbm = static_cast<half *>(args.output);
+
+    // Step 1: Hal Tensor 包装
+    Tensor<half, 2> input_gm(input_hbm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+
+    // Step 2: Hal Tile R1C32_CR 行并行
+    auto tile = make_tile<SplitMode::R1C32_CR>(
+        input_gm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+    auto block = tile.compute_core_block_shape();
+    int my_rows = static_cast<int>(block[0]);
+    if (my_rows == 0) return;
+
+    // Step 3: SPM 分配 (in0/in1/out0/out1/weight)
+    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
+    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 5));
+    half *in0   = spm_base;
+    half *in1   = in0 + D;
+    half *out0  = in1 + D;
+    half *out1  = out0 + D;
+    half *weight = out1 + D;
+
+    MemcpyHandle get_handle[2];
+    MemcpyHandle put_handle[2];
+    int buf_dbflag = 0;
+
+    size_t offset = tile.compute_linear_index();
+
+    // Step 4: 加载 weight (只一次)
+    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_handle[0]);
+    memcpy_wait(get_handle[0]);
+
+    // Step 5: 预取第一行
+    memcpy_async(CDBUF(in), input_hbm + offset, row_bytes,
+                 MemcpyGlobalToSpm, get_handle[0]);
+    memcpy_wait(get_handle[0]);
+
+    // Step 6: 流水循环: load 下一行 ⇄ 计算当前行
+    for (int r = 0; r < my_rows; ++r) {
+        // 6a. 发起下一行加载到 alternate buffer (与计算重叠)
+        if (r + 1 < my_rows) {
+            memcpy_async(ADBUF(in), input_hbm + offset + (r + 1) * D,
+                         row_bytes, MemcpyGlobalToSpm, get_handle[1 - buf_dbflag]);
+        }
+
+        // 6b. 等待当前 load + 上一轮 store
+        memcpy_wait(get_handle[buf_dbflag]);
+        memcpy_wait(put_handle[buf_dbflag]);
+
+        // 6c. RMS Norm 计算
+        float sum_sq = 0.0f;
+        for (int d = 0; d < D; ++d) {
+            float val = static_cast<float>(CDBUF(in)[d]);
+            sum_sq += val * val;
+        }
+        float rstd = 1.0f / sqrtf(sum_sq / static_cast<float>(D) + eps);
+        for (int d = 0; d < D; ++d) {
+            float val = static_cast<float>(CDBUF(in)[d]) * rstd
+                        * static_cast<float>(weight[d]);
+            CDBUF(out)[d] = static_cast<half>(val);
+        }
+
+        // 6d. 发起写回 + 等待完成
+        memcpy_async(output_hbm + offset + r * D, CDBUF(out),
+                     row_bytes, MemcpySpmToGlobal, put_handle[buf_dbflag]);
+        memcpy_wait(put_handle[buf_dbflag]);
+
+        // 6e. 交换 buffer
+        if (r + 1 < my_rows) {
+            EXDBF;
+        }
+    }
+
+    rt_spm_free(spm_base);
+}
+
+// ================================================================
+// Kernel 1: RMSNorm + residual add (双缓冲流水 + MemcpyHandle)
+// ================================================================
+__global__ void teco_slave_rms_norm_fp16_add(RmsNormArgs args) {
+    const int N = args.num_tokens;
+    const int D = args.hidden_size;
+    const float eps = args.eps;
+
+    half *input_hbm     = static_cast<half *>(const_cast<void *>(args.input));
+    half *weight_hbm    = static_cast<half *>(const_cast<void *>(args.weight));
+    half *residual_hbm  = static_cast<half *>(const_cast<void *>(args.residual));
+    half *output_hbm    = static_cast<half *>(args.output);
+    half *res_out_hbm   = static_cast<half *>(args.residual_out);
+
+    // Step 1: Hal Tensor 包装
+    Tensor<half, 2> input_gm(input_hbm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+
+    // Step 2: Hal Tile R1C32_CR 行并行
+    auto tile = make_tile<SplitMode::R1C32_CR>(
+        input_gm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+    auto block = tile.compute_core_block_shape();
+    int my_rows = static_cast<int>(block[0]);
+    if (my_rows == 0) return;
+
+    // Step 3: SPM 分配 (in0/in1/res0/res1/out0/out1/weight)
+    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
+    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 7));
+    half *in0    = spm_base;
+    half *in1    = in0 + D;
+    half *res0   = in1 + D;
+    half *res1   = res0 + D;
+    half *out0   = res1 + D;
+    half *out1   = out0 + D;
+    half *weight = out1 + D;
+
+    MemcpyHandle get_in_handle[2];
+    MemcpyHandle get_res_handle[2];
+    MemcpyHandle put_out_handle[2];
+    MemcpyHandle put_res_handle[2];
+    int buf_dbflag = 0;
+
+    size_t offset = tile.compute_linear_index();
+
+    // Step 4: 加载 weight (只一次)
+    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in_handle[0]);
+    memcpy_wait(get_in_handle[0]);
+
+    // Step 5: 预取第一行 input + residual
+    memcpy_async(CDBUF(in),  input_hbm + offset,    row_bytes,
+                 MemcpyGlobalToSpm, get_in_handle[0]);
+    memcpy_async(CDBUF(res), residual_hbm + offset, row_bytes,
+                 MemcpyGlobalToSpm, get_res_handle[0]);
+    memcpy_wait(get_in_handle[0]);
+    memcpy_wait(get_res_handle[0]);
+
+    // Step 6: 流水循环: load 下一行 ⇄ 计算当前行
+    for (int r = 0; r < my_rows; ++r) {
+        // 6a. 发起下一行加载到 alternate buffer (与计算重叠)
+        if (r + 1 < my_rows) {
+            memcpy_async(ADBUF(in), input_hbm + offset + (r + 1) * D,
+                         row_bytes, MemcpyGlobalToSpm, get_in_handle[1 - buf_dbflag]);
+            memcpy_async(ADBUF(res), residual_hbm + offset + (r + 1) * D,
+                         row_bytes, MemcpyGlobalToSpm, get_res_handle[1 - buf_dbflag]);
+        }
+
+        // 6b. 等待当前 load + 上一轮 store
+        memcpy_wait(get_in_handle[buf_dbflag]);
+        memcpy_wait(get_res_handle[buf_dbflag]);
+        memcpy_wait(put_out_handle[buf_dbflag]);
+        memcpy_wait(put_res_handle[buf_dbflag]);
+
+        // 6c. Add residual + RMS Norm
+        float sum_sq = 0.0f;
+        for (int d = 0; d < D; ++d) {
+            float val = static_cast<float>(CDBUF(in)[d])
+                        + static_cast<float>(CDBUF(res)[d]);
+            CDBUF(res)[d] = static_cast<half>(val);  // residual_out
+            sum_sq += val * val;
+        }
+        float rstd = 1.0f / sqrtf(sum_sq / static_cast<float>(D) + eps);
+        for (int d = 0; d < D; ++d) {
+            float val = static_cast<float>(CDBUF(res)[d]) * rstd
+                        * static_cast<float>(weight[d]);
+            CDBUF(out)[d] = static_cast<half>(val);
+        }
+
+        // 6d. 发起写回 + 等待完成
+        memcpy_async(output_hbm + offset + r * D, CDBUF(out),
+                     row_bytes, MemcpySpmToGlobal, put_out_handle[buf_dbflag]);
+        memcpy_async(res_out_hbm + offset + r * D, CDBUF(res),
+                     row_bytes, MemcpySpmToGlobal, put_res_handle[buf_dbflag]);
+        memcpy_wait(put_out_handle[buf_dbflag]);
+        memcpy_wait(put_res_handle[buf_dbflag]);
+
+        // 6e. 交换 buffer
+        if (r + 1 < my_rows) {
+            EXDBF;
+        }
+    }
+
+    rt_spm_free(spm_base);
+}
