@@ -37,8 +37,7 @@ for dep in deps:
 
     if not os.path.exists(dep_path):
         os.makedirs(dep_path, exist_ok=True)
-
-    if not os.path.exists(dep['build']):
+    if not os.path.exists(target_dir):
         # wget 下载
         os.system(f"wget -q {dep['src']}")
         
