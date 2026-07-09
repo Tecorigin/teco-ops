@@ -1,0 +1,66 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 不对齐向量存储，将一个向量变量中的数据存储到64字节（halfv16类型的存储是32字节）连续内存区域中。
+
+#define NUM 16
+
+__global__ void test()
+{
+    // 使用0号计算核心进行运算
+    if (threadIdx == 0) {
+        floatv16 va = {2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+                       2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0};
+        float addr[16];
+        //  初始化数据
+        for (int i = 0; i < NUM; i++) {
+            addr[i] = i;
+        }
+        simd_storeu(va, addr);
+        for (int i = 0; i < NUM; i++) {
+            printf("%f\n",addr[i]);
+        }
+    }
+}
+
+int main()
+{
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 启动核函数调用
+    test<<<1>>>();
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+    return 0;
+}
+

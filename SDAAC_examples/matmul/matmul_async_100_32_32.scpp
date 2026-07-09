@@ -1,0 +1,189 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 对int16类型的矩阵调用非阻塞式矩阵乘接口进行矩阵乘计算。
+// 并将计算结果传回Host，与Host模拟的矩阵乘结果进行对比。
+
+#include <sdaa_runtime.h>
+#include <stdio.h>
+#include <time.h>
+#include <simd.h>
+#include <sdaa_matmul.h>
+using namespace sdaa;
+
+#define M 100          // 输入矩阵行数
+#define N MatmulN32    // 输入矩阵最大列数，权重矩阵最大行数
+#define K MatmulK32    // 权重矩阵最大列数
+
+__global__ void test(char* dataA, char* dataB, char* dataC, int dev_m,
+                     int dev_k, int dev_n) {
+    // 只有0号计算核心SPE进行矩阵乘操作
+    if (threadIdx != 0) return;
+
+    // 为输入矩阵、权重矩阵和输出矩阵分配SPM空间
+    int16_t *input = (int16_t *)malloc(M * K * sizeof(int16_t));
+    int16_t *weight = (int16_t *)malloc(K * N * sizeof(int16_t));
+    int16_t *output = (int16_t *)malloc(M * N * sizeof(int16_t));
+
+    // 从Global搬运输入矩阵和权重矩阵到SPM准备调用非阻塞式矩阵乘进行计算
+    memcpy_async(input, dataA, M * K * sizeof(int16_t), MemcpyGlobalToSpm);
+    memcpy_async(weight, dataB, K * N * sizeof(int16_t), MemcpyGlobalToSpm);
+    memcpy_wait();
+
+    // 创建MatmulHandle以配置矩阵乘接口参数。此例中使用默认配置
+    MatmulHandle handle;
+
+    // 初始化矩阵乘接口，并配置输入和输出数据的类型
+    matmul_init(handle, MatmulShortToShort);
+
+    // 将权重矩阵加载到矩阵乘计算单元上
+    matmul_load_weight(handle, weight, K, N);
+    // 等待权重矩阵数据加载完成，此后可覆写weight上数据
+    matmul_wait_loading_weight(handle);
+
+    // 加载输入矩阵并计算与权重矩阵的乘积
+    matmul_compute(handle, input, M, K);
+    // 等待输入矩阵加载完成，此后可覆写input上数据
+    matmul_wait_loading_input(handle);
+
+    // 将矩阵乘运算结果写回到SPM指定位置
+    matmul_store(handle, output, M, N);
+
+    // 等待运算结果写回完成
+    matmul_wait(handle);
+
+    // 将输出矩阵从SPM搬运回Global
+    memcpy(dataC, output, M * N * sizeof(float));
+
+    // 释放在SPM申请的内存
+    free(output);
+    free(weight);
+    free(input);
+}
+
+int main() {
+    int i, j, k;
+
+    // 声明Device端地址
+    // dev_a为输入矩阵，dev_b为权重矩阵，dev_c为计算结果矩阵
+    char* dev_a = NULL;
+    char* dev_b = NULL;
+    char* dev_c = NULL;
+
+    srand(time(NULL));
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void**)&dev_a, M * K * sizeof(int16_t));
+    sdaaMalloc((void**)&dev_b, K * N * sizeof(int16_t));
+    sdaaMalloc((void**)&dev_c, M * N * sizeof(int16_t));
+
+    // 分配Host端地址
+    // host_a为输入矩阵，host_b为权重矩阵，host_c为计算结果矩阵
+    // host_c_s为Host模仿矩阵乘计算，计算结果存储矩阵
+    int16_t* host_a = (int16_t*)malloc(M * K * sizeof(int16_t));
+    int16_t* host_b = (int16_t*)malloc(K * N * sizeof(int16_t));
+    int16_t* host_c = (int16_t*)malloc(M * N * sizeof(int16_t));
+    int16_t* host_c_s = (int16_t*)malloc(M * N * sizeof(int16_t));
+
+    // 为Host端输入矩阵进行初始化
+    memset(host_a, 0, M * K * sizeof(int16_t));
+    for (i = 0; i < M; i++) {
+        for (j = 0; j < K; j++) {
+            host_a[i * K + j] = rand()%100 - 50;
+        }
+    }
+
+    // 为Host端输入权重进行初始化
+    memset(host_b, 0, K * N * sizeof(int16_t));
+    for (i = 0; i < K; i++) {
+        for (j = 0; j < N; j++) {
+            host_b[i * N + j] = rand()%5 - 2;
+        }
+    }
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_a, host_a, M * K * sizeof(int16_t), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_b, host_b, K * N * sizeof(int16_t), sdaaMemcpyHostToDevice);
+
+    // 打印矩M，K 和 N
+    printf("testcase: %d * %d * %d\n", M, K, N);
+
+    // 启动核函数调用
+    test<<<1>>>(dev_a, dev_b, dev_c, M, K, N);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端矩阵乘计算结果拷贝到Host端
+    sdaaMemcpy(host_c, dev_c, M * N * sizeof(int16_t),
+               sdaaMemcpyDeviceToHost);
+
+    // 初始化host_c_s
+    memset(host_c_s, 0, M * N * sizeof(int16_t));
+
+    // 在Host模拟矩阵乘操作，并将结果存放到host_c_s
+    for (i = 0; i < M; i++) {
+        for (j = 0; j < N; j++) {
+            for (k = 0; k < K; k++) {
+                host_c_s[i * N + j] +=
+                    host_a[i * K + k] * host_b[k * N + j];
+            }
+        }
+    }
+
+    // 将Device端矩阵乘计算结果与Host端计算结果进行对比，验证失败则打印对应日志
+    for (i = 0; i < M * N; i++) {
+      if(host_c[i] != host_c_s[i]) {
+        printf("find mismatching data on line %d: ace: %d, serial: %d\n",
+               i, (int)host_c[i], (int)host_c_s[i]);
+        break;
+      }
+
+      // 如果验证成功，则打印对应日志
+      if (i == M * N - 1) {
+        printf("matmul result compare ok\n");
+      }
+    }
+
+    // 释放在Device端和Host申请的内存
+    free(host_c_s);
+    free(host_c);
+    free(host_b);
+    free(host_a);
+    sdaaFree(dev_c);
+    sdaaFree(dev_b);
+    sdaaFree(dev_a);
+
+    return 0;
+}

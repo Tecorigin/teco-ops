@@ -1,0 +1,467 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+//
+//  场景介绍：
+//  1.
+//  对half类型的矩阵运行矩阵乘算法SUMMA。并将计算结果传回Host，与Host模拟的矩阵乘
+//  结果进行对比
+
+//  实现如下矩阵乘法：
+//      C = A * B
+//      矩阵 A[M,K]
+//      矩阵 B[K,N]
+//      矩阵 C[M,N]
+
+//  2.
+//  SUMMA算子需要对矩阵ABC根据计算核阵列进行分块，每一块会通过同步memcpy调用接口
+//  加载到对应计算核，中间每个计算核会通过同步广播接口进行广播数据，最后使用同步
+//  memcpy接口将最终结果回传到 host端
+
+//  3.
+//  使用check_matmul对输入矩阵和权重矩阵进行合法性校验。并将校验结果传回Host
+
+#include <sdaa_matmul.h>
+#include <sdaa_runtime.h>
+#include <simd.h>
+#include <stdio.h>
+using namespace sdaa;
+
+// 定义SUMMA算法的矩阵规模
+#define M 64 // 输入矩阵行数
+#define K 32 // 输入矩阵最大列数，权重矩阵最大行数
+#define N 64 // 权重矩阵最大列数
+
+// 预定义SUMMA算法使用的在遍历K维时的步长
+#define NB 2
+
+// 定义当前计算核组的阵列
+#define MESH_ROW_NUM 4 // 行数
+#define MESH_COL_NUM 8 // 列数
+
+// 定义每个计算核心可利用的SPM大小空间
+#define SPM_MEM_SIZE (235 * 1024)
+
+// 定义LOCAL空间大小
+#define THREAD_LOCAL_SIZE 2560
+
+// 定义多播使用的local buffer空间大小
+#define BROAD_SPACE_SIZE (THREAD_LOCAL_SIZE / 4)
+
+// 申请多播使用的local buffer
+__local__ char a_src_local[BROAD_SPACE_SIZE];
+__local__ char a_dst_local[BROAD_SPACE_SIZE];
+__local__ char b_src_local[BROAD_SPACE_SIZE];
+__local__ char b_dst_local[BROAD_SPACE_SIZE];
+
+// 定义行多播核列多播时的枚举标记
+enum Mask_Flag { MASK_COL = 0, MASK_ROW = 1 };
+
+// 矩阵乘法的封装函数，包含参数合法性校验
+__device__ unsigned int matmul_wrapper(const char *dataA, const char *dataB,
+                                       char *dataC, unsigned int *check_val,
+                                       const int dev_m, const int dev_k,
+                                       const int dev_n) {
+    // 合法性校验
+    *check_val += check_matmul(MatmulHalfToHalf, dataC, dataA, dataB, dev_m,
+                               dev_k, dev_n);
+    if (*check_val != 0) {
+        return *check_val;
+    }
+
+    // 执行矩阵乘法
+    matmul(MatmulHalfToHalf, dataC, dataA, dataB, dev_m, dev_k, dev_n);
+
+    return 0;
+}
+
+// 计算多播时需要的mask参数，主要针对SUMMA算法中的水平方向多播和垂直方向多播
+__device__ unsigned long gen_broadcast_mask(const Mask_Flag is_row) {
+    // 计算当前线程所在计算核组内的坐标
+    const int x_pos = threadIdx % MESH_COL_NUM;
+    const int y_pos = threadIdx / MESH_COL_NUM;
+
+    unsigned long mask = 0;
+    // 计算列多播时的mask
+    if (is_row == MASK_COL) {
+        int start_id = x_pos;
+        for (int i = 0; i < threadDim; i += MESH_COL_NUM) {
+            mask |= (1 << (start_id + i));
+        }
+    }
+    // 计算行多播时的mask
+    if (is_row == MASK_ROW) {
+        int start_id = y_pos * MESH_COL_NUM;
+        for (int i = 0; i < MESH_COL_NUM; i++) {
+            mask |= (1 << (start_id + i));
+        }
+    }
+    return mask;
+}
+
+// load_sub_block：从原地址中的大矩阵中加载子矩阵块数据到目标地址，当前调用为同步
+//                 调用
+// src_hbm： 大矩阵地址，原始数据
+// dst_spm： 子矩阵地址，目标数据
+// src_h：   原始矩阵的高
+// src_w：   原始矩阵的宽
+// dst_h：   目标矩阵的高
+// dst_w：   目标矩阵的宽
+// start_x： 目标矩阵在原始矩阵中左上角的x方向坐标
+// start_y： 目标矩阵在原始矩阵中左上角的y方向坐标
+__device__ void load_sub_block(char *src, char *dst, const int src_h,
+                               const int src_w, const int dst_h,
+                               const int dst_w, const int start_x,
+                               const int start_y) {
+    const int type_size = sizeof(half);
+    // 计算原数据在copy时的步长
+    const int src_stride = src_w * type_size;
+    // 计算原数据在copy时的起始地址
+    char *src_start = src + (start_y * src_w + start_x) * type_size;
+    for (int i = 0; i < dst_h; i++) {
+        memcpy(dst, src_start, dst_w * type_size);
+        src_start += src_stride;
+        dst += dst_w * type_size;
+    }
+}
+
+// save_sub_block从SPM上的子矩阵中保存到Global中的大目标矩阵，当前调用为同步调用
+// dst_hbm： Global上的大矩阵地址，目标数据
+// src_spm： SPM上的子矩阵地址，原始数据
+// dst_h：   目标矩阵的高
+// dst_w：   目标矩阵的宽
+// src_h：   原始矩阵的高
+// src_w：   原始矩阵的宽
+// start_x： 原始矩阵在目标矩阵中左上角的x方向坐标
+// start_y： 原始矩阵在目标矩阵中左上角的y方向坐标
+__device__ void save_sub_block(char *dst_hbm, char *src_spm, const int dst_h,
+                               const int dst_w, const int src_h,
+                               const int src_w, const int start_x,
+                               const int start_y) {
+    const int type_size = sizeof(half);
+    // 计算目标数据在copy时的步长
+    const int dst_stride = dst_w * type_size;
+    // 计算目标数据在copy时的起始地址
+    char *dst_start = dst_hbm + (start_y * dst_w + start_x) * type_size;
+    for (int i = 0; i < src_h; i++) {
+        memcpy(dst_start, src_spm, src_w * type_size);
+        dst_start += dst_stride;
+        src_spm += src_w * type_size;
+    }
+}
+
+// summa算法的核函数
+__global__ void summa(char *dataA, char *dataB, char *dataC,
+                      unsigned int *check_val, const int dev_m, const int dev_k,
+                      const int dev_n) {
+    // 获取当前线程ID
+    const int thread_id = threadIdx;
+    // 计算数据类型大小
+    const int type_size = sizeof(half);
+    // 在遍历矩阵K维度时候的步长，用户可以根据性能需求进行合理调整
+    const int nb = NB;
+    // 计算当前线程所在计算核组内的坐标
+    const int x_pos = thread_id % MESH_COL_NUM;
+    const int y_pos = thread_id / MESH_COL_NUM;
+
+    // 计算矩阵A分块后子矩阵的行数
+    const int a_sub_m = dev_m / MESH_ROW_NUM;
+    // 计算矩阵A分块后子矩阵的列数
+    const int a_sub_k = dev_k / MESH_COL_NUM;
+    // 计算矩阵B分块后子矩阵的行数
+    const int b_sub_k = dev_k / MESH_ROW_NUM;
+    // 计算矩阵B分块后子矩阵的列数
+    const int b_sub_n = dev_n / MESH_COL_NUM;
+    // 计算矩阵A子阵的大小
+    const int a_spm_num = a_sub_m * a_sub_k;
+    // 计算矩阵B子矩阵的大小
+    const int b_spm_num = b_sub_k * b_sub_n;
+    // 计算矩阵C子矩阵的大小
+    const int c_spm_num = a_sub_m * b_sub_n;
+
+    // A子矩阵多播的数据量
+    const int a_broad_num = nb * a_sub_m;
+    // B子矩阵多播的数据量
+    const int b_broad_num = nb * b_sub_n;
+
+    // 判断每次多播数据是否合法，必须是4字节的倍数
+    if (((a_broad_num & 1) != 0) || ((b_broad_num & 1) != 0)) {
+        printf("the broadcast data number must be the times of 4 bytes is not "
+               "meet!");
+        return;
+    }
+    // 计算总的存储空间大小，多播的空间需要单独分配LOCAL空间
+    const int total_mem_size =
+        a_spm_num + b_spm_num + (c_spm_num * 2) * type_size;
+    // 评估总的存储空间是否满足要求
+    if (total_mem_size > SPM_MEM_SIZE) {
+        printf("matrix scale too big!\n");
+        return;
+    }
+
+    if (((a_broad_num * type_size) > BROAD_SPACE_SIZE) ||
+        ((b_broad_num * type_size) > BROAD_SPACE_SIZE)) {
+        printf("thread local memory too small!\n");
+        return;
+    }
+
+    // 广播的源地址和目的地址必须使用local空间
+    //  矩阵A分块后的子矩阵多播的目的空间
+    char *a_dst_spm = a_dst_local;
+    // 矩阵B分块后的子矩阵多播的目的空间
+    char *b_dst_spm = b_dst_local;
+    // 矩阵A分块后的子矩阵多播的原数据空间
+    char *a_src_spm = a_src_local;
+    // 矩阵B分块后的子矩阵多播的原数据空间
+    char *b_src_spm = b_src_local;
+
+    // 申请在SPM上申请的内存
+    // 矩阵A分块后的子矩阵空间
+    char *a_spm = (char *)malloc(a_spm_num * type_size);
+    // 矩阵B分块后的子矩阵空间
+    char *b_spm = (char *)malloc(b_spm_num * type_size);
+    // 矩阵C分块后的子矩阵空间
+    char *c_spm = (char *)malloc(c_spm_num * type_size);
+    // 矩阵A和B多播后每次临时矩阵计算后的结果空间
+    char *c_rst_spm = (char *)malloc(c_spm_num * type_size);
+
+    // 检验多播地址是否4字节对齐
+    if ((unsigned long)a_src_spm % 4 != 0 ||
+        (unsigned long)a_dst_spm % 4 != 0 ||
+        (unsigned long)b_dst_spm % 4 != 0) {
+        printf("broad addr error: not 4 bytes aligned! \n");
+    }
+
+    // 初始化c_spm为0
+    memset(c_spm, 0, c_spm_num * type_size);
+    // 初始化check_val为0
+    memset(check_val, 0, threadDim * sizeof(unsigned int));
+
+    // 从Global加载A的子矩阵到SPM
+    load_sub_block(dataA, a_spm, dev_m, dev_k, a_sub_m, a_sub_k,
+                   a_sub_k * x_pos, a_sub_m * y_pos);
+    // 从Global加载B的子矩阵到SPM
+    load_sub_block(dataB, b_spm, dev_k, dev_n, b_sub_k, b_sub_n,
+                   b_sub_n * x_pos, b_sub_k * y_pos);
+
+    // 计算多播相关参数
+    unsigned row_mask = gen_broadcast_mask(MASK_ROW);
+    unsigned col_mask = gen_broadcast_mask(MASK_COL);
+
+    // 创建线程组
+    ThreadGroup row_thread_group(row_mask);
+    ThreadGroup col_thread_group(col_mask);
+
+    // 设置多播mask参数
+    BroadcastHandle handle_row, handle_col;
+    broadcast_set_thread_group(handle_row, &row_thread_group);
+    broadcast_set_thread_group(handle_col, &col_thread_group);
+
+    // 多播同步
+    sync_threads();
+
+    // 在K维度上进行遍历，每次计算最终结果的一部分
+    for (int i = 0; i < dev_k; i += nb) {
+        //  计算本次水平广播的发起方ID
+        unsigned root_row = (y_pos * MESH_COL_NUM) + (i / a_sub_k);
+        // 准备水平广播的数据
+        if (root_row == thread_id) {
+            // 由于A每次多播的数据为部分列，所以需要
+            // 将矩阵A的多播数据从不连续的子块空间，拷贝到连续的地址空间
+            load_sub_block(a_spm, a_src_spm, a_sub_m, a_sub_k, a_sub_m, nb,
+                           i % a_sub_k, 0);
+        }
+        // 调用广播同步接口，矩阵A进行水平方向广播
+        broadcast(a_dst_spm, a_src_spm, a_broad_num * type_size, root_row,
+                  BroadcastSpmToSpm, handle_row);
+
+        // 计算本次垂直广播的发起方ID
+        unsigned root_col = x_pos + ((i / b_sub_k) * MESH_COL_NUM);
+        // 准备本次垂直广播的原地址空间数据，因为数据是连续的，调用memcpy一次即可
+        memcpy(b_src_spm, b_spm + ((i % b_sub_k) * b_sub_n * type_size),
+               b_broad_num * type_size);
+        // 调用广播同步接口，矩阵B进行垂直方向广播
+        broadcast(b_dst_spm, b_src_spm, b_broad_num * type_size, root_col,
+                  BroadcastSpmToSpm, handle_col);
+
+        // 注意：用户必须广播同步，确保接收方接收到数据，因为各个线程以不同的时序
+        // 运行，广播接口内没有进行同步
+        sync_threads();
+
+        // 对广播收到的A的子矩阵核B的子矩阵进行乘法运算
+        matmul_wrapper(a_dst_spm, b_dst_spm, c_rst_spm, check_val + thread_id,
+                       a_sub_m, nb, b_sub_n);
+        // 将每次临时计算的结果进行累加
+        halfv16 v_dst, v_src;
+        for (int i = 0; i < c_spm_num;) {
+            int current_num = ((i + 16) <= c_spm_num) ? 16 : (c_spm_num - i);
+            if (16 == current_num) {
+                // 如果当前计算16个连续的数据要求，调用并行指令
+                simd_load(v_dst, c_spm + i * type_size);
+                simd_load(v_src, c_rst_spm + i * type_size);
+                v_dst += v_src;
+                simd_store(v_dst, c_spm + i * type_size);
+                i += 16;
+            } else {
+                // 对单个数据，进行串行计算
+                half *src = (half *)c_rst_spm;
+                half *dst = (half *)c_spm;
+                *(dst + i) += *(src + i);
+                i++;
+            }
+        }
+    }
+    // 从SPM保存C的子矩阵到Global
+    save_sub_block(dataC, c_spm, dev_m, dev_n, a_sub_m, b_sub_n,
+                   b_sub_n * x_pos, a_sub_m * y_pos);
+
+    // 释放在SPM上申请的内存
+    free(a_spm);
+    free(b_spm);
+    free(c_spm);
+    free(c_rst_spm);
+}
+
+int main() {
+    int i = 0, j = 0, k = 0;
+    // 声明Device端地址
+    // dev_a为输入矩阵，dev_b为权重矩阵，dev_c为计算结果矩阵
+    char *dev_a = NULL;
+    char *dev_b = NULL;
+    char *dev_c = NULL;
+
+    // 设置随机种子
+    srand(100);
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+    sdaaMalloc((void **)&dev_a, M * K * sizeof(half));
+    sdaaMalloc((void **)&dev_b, K * N * sizeof(half));
+    sdaaMalloc((void **)&dev_c, M * N * sizeof(half));
+
+    // 分配Host端地址
+    // host_a为输入矩阵，host_b为权重矩阵，host_c为计算结果矩阵
+    // host_c_s为Host模仿矩阵乘计算，计算结果存储矩阵
+    half *host_a = (half *)malloc(M * K * sizeof(half));
+    half *host_b = (half *)malloc(K * N * sizeof(half));
+    half *host_c = (half *)malloc(M * N * sizeof(half));
+
+    // 为Host端输入矩阵进行初始化
+    memset(host_a, 0, M * K * sizeof(half));
+    for (i = 0; i < M; i++) {
+        for (j = 0; j < K; j++) {
+            host_a[i * K + j] = 1.0 * rand() / RAND_MAX * 10.0 - 5;
+        }
+    }
+    // 为Host端输入权重进行初始化
+    memset(host_b, 0, K * N * sizeof(half));
+    for (i = 0; i < K; i++) {
+        for (j = 0; j < N; j++) {
+            host_b[i * N + j] = 1.0 * rand() / RAND_MAX * 0.1 - 0.05;
+        }
+    }
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_a, host_a, M * K * sizeof(half), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_b, host_b, K * N * sizeof(half), sdaaMemcpyHostToDevice);
+
+    // 声明Device端dev_check_val
+    unsigned int *dev_check_val = NULL;
+    // 使用sdaaMalloc为dev_check_val进行空间分配
+    sdaaMalloc((void **)&dev_check_val, threadDim * sizeof(unsigned int));
+    // 为check_val在host端进行空间分配
+    unsigned int *check_val =
+        (unsigned int *)malloc(threadDim * sizeof(unsigned int));
+
+    summa<<<1>>>(dev_a, dev_b, dev_c, dev_check_val, M, K, N);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端矩阵乘计算结果拷贝到Host端
+    sdaaMemcpy(host_c, dev_c, M * N * sizeof(half),sdaaMemcpyDeviceToHost);
+
+    // 使用sdaaMemcpy将Device端验证输入参数合法性结果拷贝到Host端
+    sdaaMemcpy(check_val, dev_check_val, threadDim * sizeof(unsigned int),
+               sdaaMemcpyDeviceToHost);
+
+    // 对check结果进行合法性校验，验证失败则打印验证失败日志，否则打印验证成功日志
+    bool check_result = true;
+    for (i = 0; i < threadDim; i++) {
+        if (check_val[i] != 0) {
+            check_result = false;
+            printf("thread %d check_matmul failed, returns %d\n", i,
+                   *check_val);
+        }
+    }
+
+    if (check_result) {
+        printf("all check_matmul checked done\n");
+
+        // 在Host模拟矩阵乘操作，并将结果存放到host_c_s
+        half *host_c_s = (half *)malloc(M * N * sizeof(half));
+        memset(host_c_s, 0, M * N * sizeof(half));
+        for (i = 0; i < M; i++) {
+            for (j = 0; j < N; j++) {
+                for (k = 0; k < K; k++) {
+                    host_c_s[i * N + j] +=
+                        host_a[i * K + k] * host_b[k * N + j];
+                }
+            }
+        }
+
+        // 将Device端矩阵乘计算结果与Host端计算结果进行对比，验证失败则打印对应日志
+        for (i = 0; i < M * N; i++) {
+            if ((host_c[i] - host_c_s[i] > 1.5e-2)) {
+                printf("find mismatching data Pos %d, on line %d, col %d: ace: "
+                       "%f, serial: %f\n",
+                       i, i / N, i % N, (float)host_c[i], (float)host_c_s[i]);
+                break;
+            }
+            if (i == M * N - 1) {
+                printf("SUMMA result compare ok\n");
+            }
+        }
+
+        // 释放host_c_s空间
+        free(host_c_s);
+    }
+
+    // 释放在Device端和Host申请的内存
+    free(check_val);
+    sdaaFree(dev_check_val);
+    free(host_c);
+    free(host_b);
+    free(host_a);
+    sdaaFree(dev_c);
+    sdaaFree(dev_b);
+    sdaaFree(dev_a);
+
+    return 0;
+}

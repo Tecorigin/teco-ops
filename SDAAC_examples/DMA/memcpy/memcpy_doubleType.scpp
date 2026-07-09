@@ -1,0 +1,121 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 对数据量为100的数组，前96个数据在Device端计算，后面4个数据在Host端计算。
+// 2. 96个数据根据从核数量进行均分，每个从核仅计算3个数据。
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+#define N 100    // 数据量
+
+// 三角函数计算，对任意数据计算结果输出的期望值为1
+// __host__ __device__ 两个关键字修饰表示该函数既可以在Host端运行，也可以在Device端运行
+__host__ __device__ double CALC(double x);
+#define CALC(x) sin(x)*sin(x) + cos(x)*cos(x)
+
+__global__ void compute(double *src, unsigned long size) {
+    int tid = threadIdx;
+
+    // 为每个计算核心分配SPM空间
+    double *calc_area = (double *)malloc(size * sizeof(double));
+
+    // 使用memcpy将Global内存数据拷贝到SPM
+    memcpy(calc_area, &src[tid * size], sizeof(double) * size);
+
+    // 在SPM上进行三角函数计算
+    for (int i = 0; i < size; i++) {
+        double tmp = calc_area[i];
+        calc_area[i] = CALC(tmp);
+    }
+
+    // 将数据从SPM拷贝回Global内存
+    memcpy(&src[tid * size], calc_area, size * sizeof(double));
+
+    // 释放申请的SPM内存
+    free(calc_area);
+}
+
+void computeWithSdaa(double *src, double *dst, unsigned long size) {
+    // buf_size 表示每个计算核心需要进行的计算量
+    unsigned long buf_size = size / 32;
+    double *dev_str = NULL;
+
+    // 对剩余数据量在Host端进行三角函数运算
+    for (int i = size - size % 32; i < size; i++) {
+        dst[i] = CALC(src[i]);
+    }
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    sdaaMalloc((void**)(&dev_str), (size - size % 32) * sizeof(double));
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_str, src, (size - size % 32) * sizeof(double),
+               sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    compute<<<1>>>(dev_str, buf_size);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(dst, dev_str, (size - size%32) * sizeof(double),
+               sdaaMemcpyDeviceToHost);
+
+    // 释放Device端内存
+    sdaaFree(dev_str);
+}
+
+int main() {
+    double data[N];
+    double result[N];
+
+    // 初始化源数据和结果数组
+    for (int i = 0; i < N; i++) {
+        data[i] = rand();
+        result[i] = 0;
+    }
+
+    computeWithSdaa(data, result, N);
+
+    // 对计算结果进行打印输出
+    for (int i = 0; i < N; i++) {
+        printf("%lf\t", result[i]);
+    }
+    printf("\n");
+
+    return 0;
+}

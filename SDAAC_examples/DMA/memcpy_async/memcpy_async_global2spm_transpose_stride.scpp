@@ -1,0 +1,210 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端申请三块内存
+//    h_src：数据搬运的源地址
+//    h_dst：存储Device端跨步数据搬运结果的目的地址
+//    h_ref：在Host端模拟跨步数据搬运接口的参考结果地址
+// 2. 将数据搬运的源地址内存和存储数据搬运结果的目的结果内存拷贝到设备端
+// 3. 在设备端使用memcpy_async的跨步功能进行跨步数据搬运，并将数据搬运结果
+//    拷贝到d_dst内
+// 4. 将Device端完成的跨步数据搬运结果与在Host端模拟的结果进行对比。
+
+using namespace sdaa;
+
+#define SIZE 32
+#define STRIDE 16
+#define SECTION 16
+#define SECTION_NUM 16
+// 在Global存储空间声明一个64B对齐的二维数组
+__device__ int g_src[SIZE][SIZE] __attribute__((aligned(64)));
+
+__global__ void func(int **d_dst, int **d_src)
+{
+    // 仅使用0号SPE完成本次跨步数据搬运
+    if (threadIdx != 0) {
+        return;
+    }
+
+    // 在SPM上申请一个二维数组指针
+    int **dst = (int **)malloc(SIZE * sizeof(int*));
+    // 为二维数组申请内存空间
+    for (int i = 0; i < SIZE; i++) {
+        dst[i] = (int *)malloc(SIZE * sizeof(int));
+    }
+
+    // 初始化SPM上申请的二维数组
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            g_src[i][j] = d_src[i][j];
+            dst[i][j] = d_dst[i][j];
+        }
+    }
+
+    // 定义跨步变量
+    // section_num为16, Global存储的跨步为64B
+    Stride stride(SECTION_NUM, STRIDE * sizeof(int));
+    // 定义拷贝句柄
+    MemcpyHandle handle(&stride);
+
+    // 在跨步数据搬运前使用check_memcpy_async对输入参数进行合法性检查
+    unsigned int check_res = check_memcpy_async(dst[0], g_src[0],
+                                                SECTION * sizeof(int),
+                                                MemcpyGlobalToSpm, handle);
+    if (check_res == MEMCPY_ASYNC_SUCC) {
+        // 参数合法则进行异步跨步数据搬运
+        memcpy_async(dst[0], g_src[0], SECTION * sizeof(int), MemcpyGlobalToSpm,
+                     handle);
+        // 等待异步操作完成
+        memcpy_wait(handle);
+    }
+
+    // 将数据搬运结果拷贝到d_dst内存
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            d_dst[i][j] = dst[i][j];
+        }
+    }
+
+    // 释放二维数组
+    for (int i = 0; i < SIZE; i++) {
+        free(dst[i]);
+    }
+
+    // 释放二维数组指针
+    free(dst);
+}
+
+// 在Host端模拟跨步操作
+void dma_stride_transpose(int (*dst)[SIZE], int (*src)[SIZE])
+{
+    int row = 0;
+    int col = 0;
+    for (int i = 0; i < SECTION_NUM; i++) {
+        for (int j = 0; j < SECTION; j++) {
+            dst[row][col++] = src[i][j];
+            if (col >= SIZE) {
+                row++;
+                col = 0;
+            }
+        }
+    }
+}
+
+int main()
+{
+    // 定义Host端原数据数组、目的数据数组和接口对比数组
+    int h_src[SIZE][SIZE];
+    int h_dst[SIZE][SIZE];
+    int h_ref[SIZE][SIZE];
+
+    // 初始化Host端数据
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            h_src[i][j] = j;
+            h_dst[i][j] = 0;
+            h_ref[i][j] = 0;
+        }
+    }
+
+    // 使用0号计算核心阵列作为计算资源
+    sdaaSetDevice(0);
+
+    // 定义Host端地址指针
+    int *d_src[SIZE];
+    int *d_dst[SIZE];
+    for (int i = 0; i < SIZE; i++) {
+        // 为设备端地址分配内存空间
+        sdaaMalloc((void **)(&d_src[i]), SIZE * sizeof(int));
+        sdaaMalloc((void **)(&d_dst[i]), SIZE * sizeof(int));
+
+        // 将Host端数据拷贝到设备端
+        sdaaMemcpy(d_src[i], h_src[i], SIZE * sizeof(int),
+                   sdaaMemcpyHostToDevice);
+        sdaaMemcpy(d_dst[i], h_dst[i], SIZE * sizeof(int),
+                   sdaaMemcpyHostToDevice);
+    }
+
+    // 定义Device端地址指针
+    int **d_src_ptr = NULL;
+    int **d_dst_ptr = NULL;
+
+    // 为设备端地址指针分配内存空间
+    sdaaMalloc((void **)(&d_src_ptr), SIZE * sizeof(int*));
+    sdaaMalloc((void **)(&d_dst_ptr), SIZE * sizeof(int*));
+
+    // 将Host端数据拷贝到设备端
+    sdaaMemcpy(d_src_ptr, d_src, SIZE * sizeof(int*),
+               sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_dst_ptr, d_dst, SIZE * sizeof(int*),
+               sdaaMemcpyHostToDevice);
+
+    // 核函数调用
+    func<<<1>>>(d_dst_ptr, d_src_ptr);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 将数据拷贝到Host端
+    for (int i = 0; i < SIZE; i++) {
+        sdaaMemcpy(h_dst[i], d_dst[i], SIZE * sizeof(int),
+                   sdaaMemcpyDeviceToHost);
+    }
+
+    // 在Host端模拟跨步操作
+    dma_stride_transpose(h_ref, h_src);
+
+    // 将Device端跨步操作结果与Host端模拟结果进行对比
+    int err_num = 0;
+    for (int i = 0; i < SIZE; i++) {
+        for (int j = 0; j < SIZE; j++) {
+            if (h_dst[i][j] == h_ref[i][j]) {
+                continue;
+            }
+
+            printf("%d\t%d\t%d\n", h_dst[i][j], h_src[i][j], h_ref[i][j]);
+            err_num++;
+        }
+    }
+
+    if (err_num == 0) {
+        printf("host printf check: errnum 0\n");
+    }
+
+    // 释放Device端申请的内存
+    sdaaFree(d_dst_ptr);
+    sdaaFree(d_src_ptr);
+    for (int i = 0; i < SIZE; i++) {
+        sdaaFree(d_dst[i]);
+        sdaaFree(d_src[i]);
+    }
+    return 0;
+}

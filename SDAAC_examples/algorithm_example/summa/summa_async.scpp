@@ -1,0 +1,581 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+//  场景介绍：
+//  1.
+//  对half类型的矩阵运行矩阵乘算法SUMMA。并将计算结果传回Host，与Host模拟的矩阵乘
+//  结果进行对比
+
+//  实现如下矩阵乘法：
+//      C = A * B
+//      矩阵 A[M,K]
+//      矩阵 B[K,N]
+//      矩阵 C[M,N]
+
+//  2.
+//  SUMMA算子需要对矩阵ABC根据计算核阵列进行分块，本次实现采用异步调用，加载矩阵
+//  数据的时候进行异步memcpy接口调用，矩阵A和B的数据进行广播的时候调用broadcast
+//  进行异步接口调用，最后对广播收到的矩阵就行矩阵乘法接口调用，最后使用同步memcpy
+//  接口将最终结果回传到 host端。实现过程中建立的流水线如下图所示：
+//      流水线示意图：
+//           时间        任务1     任务2      任务3
+//          0 * nb        do
+//          1 * nb        do        do
+//          2 * nb        do        do        do
+//          3 * nb        do        do        do
+//          4 * nb        do        do        do
+//                      ............
+//                      ............
+//                      ............
+//       (n-2)* nb        do        do        do
+//       (n-1)* nb                  do        do
+//        n   * nb                            do
+//      说明:
+//         a) nb表示算法中在矩阵的K维度上遍历时的步长大小
+//         b) do表示示在流水线上某个时间步需要执行任务
+//  3.
+//  使用check_matmul对输入矩阵和权重矩阵进行合法性校验。并将校验结果传回Host
+
+#include <sdaa_matmul.h>
+#include <sdaa_runtime.h>
+#include <simd.h>
+#include <stdio.h>
+using namespace sdaa;
+
+// 定义SUMMA算法的矩阵规模
+#define M 128 // 输入矩阵行数
+#define K 128 // 输入矩阵最大列数，权重矩阵最大行数
+#define N 64  // 权重矩阵最大列数
+
+// 预定义SUMMA算法使用的在遍历K维时的步长
+#define NB 2
+
+// 定义当前计算核组的阵列
+#define MESH_ROW_NUM 4 // 行数
+#define MESH_COL_NUM 8 // 列数
+
+// 定义每个计算核心可利用的SPM大小空间
+#define SPM_MEM_SIZE (235 * 1024)
+
+// 定义LOCAL空间大小
+#define THREAD_LOCAL_SIZE 2560
+
+// 定义多播使用的local buffer空间大小
+#define BROAD_SPACE_SIZE (THREAD_LOCAL_SIZE / 4)
+
+// 申请多播使用的local buffer
+__local__ char a_local[BROAD_SPACE_SIZE];
+__local__ char b_local[BROAD_SPACE_SIZE];
+__local__ char c_local[BROAD_SPACE_SIZE];
+__local__ char d_local[BROAD_SPACE_SIZE];
+
+// 计算双缓冲区当前标记对应的缓存区地址
+#define CDBUF(x) (x + (x##_dual_size >> 1) * x##_dbflag)
+// 计算双缓冲区非当前标记对应的缓存区地址
+#define ADBUF(x) (x + (1 - x##_dbflag) * (x##_dual_size >> 1))
+// 交换缓冲区标记：0变1，或1变0
+#define EXDBF(x) x##_dbflag = 1 - x##_dbflag
+
+// 定义行多播核列多播时的枚举标记
+enum Mask_Flag { MASK_COL = 0, MASK_ROW = 1 };
+
+// 矩阵乘法的封装函数，包含参数合法性校验
+__device__ unsigned int matmul_wrapper(const void *dataA, const void *dataB,
+                                       void *dataC, unsigned int *check_val,
+                                       const int dev_m, const int dev_k,
+                                       const int dev_n) {
+    // 合法性校验
+    *check_val += check_matmul(MatmulHalfToHalf, dataC, dataA, dataB, dev_m,
+                               dev_k, dev_n);
+    if (*check_val != 0) {
+        return *check_val;
+    }
+    // 执行矩阵乘法
+    matmul(MatmulHalfToHalf, dataC, dataA, dataB, dev_m, dev_k, dev_n);
+
+    return 0;
+}
+
+// 计算多播时需要的mask参数，主要针对SUMMA算法中的水平方向多播和垂直方向多播
+__device__ unsigned long gen_broadcast_mask(const Mask_Flag is_row) {
+    // the coordiation of each core
+    const int x_pos = threadIdx % MESH_COL_NUM;
+    const int y_pos = threadIdx / MESH_COL_NUM;
+
+    unsigned long mask = 0;
+    // 计算列多播时的mask
+    if (is_row == MASK_COL) {
+        int start_id = x_pos;
+        for (int i = 0; i < threadDim; i += MESH_COL_NUM) {
+            mask |= (1 << (start_id + i));
+        }
+    }
+    // 计算行多播时的mask
+    if (is_row == MASK_ROW) {
+        int start_id = y_pos * MESH_COL_NUM;
+        for (int i = 0; i < MESH_COL_NUM; i++) {
+            mask |= (1 << (start_id + i));
+        }
+    }
+    return mask;
+}
+
+// load_sub_block从Global上的原始大矩阵中加载子矩阵数据到SPM，当前调用为异步调用
+// src_hbm： Global上的大矩阵地址，原始数据
+// dst_spm： SMP上的子矩阵地址，目标数据
+// src_h：   原始矩阵的高
+// src_w：   原始矩阵的宽
+// dst_h：   目标矩阵的高
+// dst_w：   目标矩阵的宽
+// start_x： 目标矩阵在原始矩阵中左上角的x方向坐标
+// start_y： 目标矩阵在原始矩阵中左上角的y方向坐标
+// handle：  memcpy_async异步调用需要的handle
+__device__ void load_sub_block(const char *src_hbm, half *dst_spm,
+                               const int src_h, const int src_w,
+                               const int dst_h, const int dst_w,
+                               const int start_x, const int start_y,
+                               MemcpyHandle &handle) {
+    // 计算原数据在copy时的步长
+    const int src_stride = src_w;
+    // 计算原数据在copy时的起始地址
+    half *src_start = (half *)src_hbm + (start_y * src_w + start_x);
+    for (int i = 0; i < dst_h; i++) {
+        memcpy_async(dst_spm, src_start, dst_w * sizeof(half),
+                     MemcpyGlobalToSpm, handle);
+        src_start += src_stride;
+        dst_spm += dst_w;
+    }
+}
+
+// save_sub_block从SPM上的子矩阵中保存到Global中的大目标矩阵，当前调用为同步调用
+// dst_hbm： Global上的大矩阵地址，目标数据
+// src_spm： SMP上的子矩阵地址，原始数据
+// dst_h：   目标矩阵的高
+// dst_w：   目标矩阵的宽
+// src_h：   原始矩阵的高
+// src_w：   原始矩阵的宽
+// start_x： 原始矩阵在目标矩阵中左上角的x方向坐标
+// start_y： 原始矩阵在目标矩阵中左上角的y方向坐标
+__device__ void save_sub_block(char *dst_hbm, const half *src_spm,
+                               const int dst_h, const int dst_w,
+                               const int src_h, const int src_w,
+                               const int start_x, const int start_y) {
+    // 计算目标数据在copy时的步长
+    const int dst_stride = dst_w;
+    // 计算目标数据在copy时的起始地址
+    half *dst_start = (half *)dst_hbm + (start_y * dst_w + start_x);
+    for (int i = 0; i < src_h; i++) {
+        memcpy(dst_start, src_spm, src_w * sizeof(half));
+        dst_start += dst_stride;
+        src_spm += src_w;
+    }
+}
+
+// summa算法的核函数
+__global__ void summa(char *dataA, char *dataB, char *dataC,
+                      unsigned int *check_val, const int dev_m, const int dev_k,
+                      const int dev_n) {
+    // 获取当前线程ID
+    const int thread_id = threadIdx;
+
+    // 计算数据类型大小
+    const int type_size = sizeof(half);
+    // 在遍历矩阵K维度时候的步长，用户可以根据性能需求进行合理调整
+    const int nb = NB;
+    // 计算当前线程所在计算核组内的坐标
+    const int x_pos = thread_id % MESH_COL_NUM;
+    const int y_pos = thread_id / MESH_COL_NUM;
+    // 计算矩阵A分块后子矩阵的行数
+    const int a_sub_m = dev_m / MESH_ROW_NUM;
+    // 计算矩阵A分块后子矩阵的列数
+    const int a_sub_k = dev_k / MESH_COL_NUM;
+    // 计算矩阵B分块后子矩阵的行数
+    const int b_sub_k = dev_k / MESH_ROW_NUM;
+    // 计算矩阵B分块后子矩阵的列数
+    const int b_sub_n = dev_n / MESH_COL_NUM;
+
+    // 计算矩阵A矩阵中每次加载到SPM的数据量
+    const int a_spm_num = a_sub_m * nb;
+    // 计算矩阵B矩阵中每次加载到SPM的数据量
+    const int b_spm_num = nb * b_sub_n;
+    // 计算矩阵C矩阵中每次加载到SPM的数据量
+    const int e_spm_num = a_sub_m * b_sub_n;
+
+    // 计算双缓冲数据量
+    // A广播到C, A  --> C
+    // B广播到D, B  --> D
+
+    //  计算矩阵A矩阵中每次加载到SPM对应的双缓冲区数据量
+    const int a_spm_dual_size = a_sub_m * nb * 2;
+    // 计算矩阵B矩阵中每次加载到SPM对应的双缓冲区数据量
+    const int b_spm_dual_size = nb * b_sub_n * 2;
+    // 计算矩阵A矩阵中每次广播目的矩阵对应的双缓冲区数据量
+    const int c_spm_dual_size = a_spm_dual_size;
+    // 计算矩阵B矩阵中每次广播目的矩阵对应的双缓冲区数据量
+    const int d_spm_dual_size = b_spm_dual_size;
+
+    // 每次A和B矩阵广播的目的矩阵乘积结果对应的SPM数据量
+    const int e_spm_single_size = e_spm_num;
+
+    // 计算总的SPM存储空间大小需求
+    const int total_mem_size = (e_spm_single_size * 2) * type_size;
+    // 评估总的存储空间是否满足要求
+    if (total_mem_size > SPM_MEM_SIZE) {
+        printf("matrix scale too big\n");
+        return;
+    }
+
+    if (((a_spm_num * type_size) > BROAD_SPACE_SIZE) ||
+        ((b_spm_num * type_size) > BROAD_SPACE_SIZE)) {
+        printf("thread local memory too small!\n");
+        return;
+    }
+    // 广播的源地址和目的地址必须使用local空间
+    // 矩阵A每次加载到SPM对应的部分子矩阵部分空间
+    half *a_spm = (half *)a_local;
+    // 矩阵B每次加载到SPM对应的部分子矩阵部分空间
+    half *b_spm = (half *)b_local;
+    // 矩阵A每次加载到SPM对应的部分子矩阵对应的多播目的空间
+    half *c_spm = (half *)c_local;
+    // 矩阵B每次加载到SPM对应的部分子矩阵对应的多播目的空间
+    half *d_spm = (half *)d_local;
+
+    // 检验多播地址是否4字节对齐
+    if ((unsigned long)a_spm % 4 != 0 || (unsigned long)b_spm % 4 != 0 ||
+        (unsigned long)c_spm % 4 != 0 || (unsigned long)d_spm % 4 != 0) {
+        printf("broad addr error: not 4 bytes aligned! \n");
+    }
+
+    // 判断每次多播数据是否合法，必须是4字节的倍数
+    if (((a_spm_num & 1) != 0) || ((b_spm_num & 1) != 0)) {
+        printf("the broadcast data number must be the times of 4 bytes is not "
+               "meet!");
+        return;
+    }
+    // 申请在SPM上申请的内存
+    // 每次A和B矩阵广播的目的矩阵乘积结果对应的SPM空间
+    half *e_spm = (half *)malloc(e_spm_single_size * type_size);
+    // A的子矩阵和B子矩阵最终乘积结果对应的SPM空间
+    half *final_spm = (half *)malloc(e_spm_single_size * type_size);
+
+    // 初始化final_spm为0
+    memset(final_spm, 0, e_spm_single_size * type_size);
+    // 初始化check_val为0
+    memset(check_val, 0, threadDim * sizeof(unsigned int));
+
+    // 声明通过异步memcpy加载A的部分子矩阵所用的handle
+    MemcpyHandle a_spm_handle[2];
+    // 声明通过异步memcpy加载B的部分子矩阵所用的handle
+    MemcpyHandle b_spm_handle[2];
+
+    // 4个双缓冲区对应的标记，初始值为0，先使用双缓冲区中的第一个
+    int a_spm_dbflag = 0;
+    int b_spm_dbflag = 0;
+    int c_spm_dbflag = 0;
+    int d_spm_dbflag = 0;
+
+    // 计算多播相关参数
+    unsigned row_mask = gen_broadcast_mask(MASK_ROW);
+    unsigned col_mask = gen_broadcast_mask(MASK_COL);
+
+    // 创建线程组
+    ThreadGroup row_thread_group(row_mask);
+    ThreadGroup col_thread_group(col_mask);
+
+    // 多播句柄，因为多播采用异步，因此每个多播都有两个handle，和双缓冲对应
+    BroadcastHandle handle_row[2], handle_col[2];
+    // 设置多播mask参数
+    broadcast_set_thread_group(handle_row[0], &row_thread_group);
+    broadcast_set_thread_group(handle_col[0], &col_thread_group);
+    broadcast_set_thread_group(handle_row[1], &row_thread_group);
+    broadcast_set_thread_group(handle_col[1], &col_thread_group);
+
+    // 多播同步
+    sync_threads();
+
+    // 记录对上一次数据进行广播的发送核id信息
+    int pre_root_row = -1;
+    int pre_root_col = -1;
+    // 流水线示意图
+    //      时间        任务1     任务2      任务3
+    //     0 * nb        do
+    //     1 * nb        do        do
+    //     2 * nb        do        do        do
+    //     3 * nb        do        do        do
+    //     4 * nb        do        do        do
+    //                 ............
+    //                 ............
+    //                 ............
+    //  (n-2)* nb        do        do        do
+    //  (n-1)* nb                  do        do
+    //   n   * nb                            do
+
+    for (int i = 0; i < (dev_k + 2 * nb); i += nb) {
+        // 为了排空流水线
+        if (i <= dev_k) {
+            // 任务1开始： 加载矩阵A的子矩阵和B的子矩阵，为下一次任务2准备数据
+
+            // 计算此次次A矩阵广播数据的发送核ID
+            unsigned root_row = (y_pos * MESH_COL_NUM) + (i / a_sub_k);
+            // 计算此次B矩阵广播数据的发送核ID
+            unsigned root_col = x_pos + ((i / b_sub_k) * MESH_COL_NUM);
+            if (root_row == thread_id) {
+                // 如果当前核发送A矩阵数据，异步加载数据
+                load_sub_block(dataA, CDBUF(a_spm), dev_m, dev_k, a_sub_m, nb,
+                               a_sub_k * x_pos + (i % a_sub_k), a_sub_m * y_pos,
+                               a_spm_handle[a_spm_dbflag]);
+            }
+
+            if (root_col == thread_id) {
+                // 如果当前核发送B矩阵数据，异步加载数据
+                load_sub_block(dataB, CDBUF(b_spm), dev_k, dev_n, nb, b_sub_n,
+                               b_sub_n * x_pos, b_sub_k * y_pos + (i % b_sub_k),
+                               b_spm_handle[b_spm_dbflag]);
+            }
+            // 任务1结束
+            // 为了初始化流水线
+            if (i == 0)
+                goto SWAP_FLAG;
+        }
+        // 为了排空流水线
+        if (i <= dev_k + nb) {
+            // 任务2开始： 对矩阵A的子矩阵和B的子矩阵进行广播
+
+            // 计算待广播的上一次迭代数据A矩阵发送核ID
+            pre_root_row = (y_pos * MESH_COL_NUM) + ((i - nb) / a_sub_k);
+            // 计算待广播的上一次迭代数据B矩阵发送核ID
+            pre_root_col = x_pos + (((i - nb) / b_sub_k) * MESH_COL_NUM);
+
+            // 等待数据就绪
+            if (thread_id == pre_root_row) {
+                //  等待本次多播发送的A数据加载完成
+                memcpy_wait(a_spm_handle[1 - a_spm_dbflag]);
+            }
+            if (thread_id == pre_root_col) {
+                // 等待本次多播发送的B数据加载完成
+                memcpy_wait(b_spm_handle[1 - b_spm_dbflag]);
+            }
+
+            // 注意：对sync_threads()调用的说明
+            // 第n  次异步广播使用双缓冲的[0]号buffer
+            // 第n+1次异步广播使用双缓冲的[1]号buffer
+            // 第n+2次异步广播使用双缓冲的[0]号buffer
+            // 由于所有的线程以不同的速度运行，当执行第n+2次广播的时候，再次使用到
+            // 第0号buffer,但是此时[0]号的广播接收方线程不一定收到第n次广播的数据,
+            // 因此每当循环次数前进2次的时候，需要多所有线程进行下同步，确保第n次
+            // 广播的数据被接收到后，再进行n+2次广播。由于循环的步长为nb,因此需要
+            // 根据i %(2 * nb)是否为0来确定所有线程同步的时机。
+            //
+            // 否则，在broadcast_async之前如果缺少sync_threads()调用，发送线程会
+            // 不等待接收方是否收完第n次通过[0]号buffer广播的数据，再次利用[0]号
+            // buffer进行数据广播接收方收到的第n次广播数据是不确定的，会导致最终
+            // 结果错误。
+            if (i % (2 * nb) == 0)
+                sync_threads();
+
+            // 矩阵A的数据进行异步广播
+            broadcast_async(ADBUF(c_spm), ADBUF(a_spm), a_spm_num * type_size,
+                            pre_root_row, BroadcastSpmToSpm,
+                            handle_row[1 - c_spm_dbflag]);
+            // 矩阵B的数据进行异步广播
+            broadcast_async(ADBUF(d_spm), ADBUF(b_spm), b_spm_num * type_size,
+                            pre_root_col, BroadcastSpmToSpm,
+                            handle_col[1 - d_spm_dbflag]);
+            // 如果是本核发送数据，调用等待返回后，可以确保本次多播的源数据缓冲区
+            // 可以释放
+            if (thread_id == pre_root_row) {
+                broadcast_wait(handle_row[1 - c_spm_dbflag]);
+            }
+            if (thread_id == pre_root_col) {
+                broadcast_wait(handle_col[1 - d_spm_dbflag]);
+            }
+            // 任务2结束
+            // 为了初始化流水线
+            if (i == nb)
+                goto SWAP_FLAG;
+        }
+
+        // 任务3开始： 对矩阵A的子矩阵和B的子矩阵广播的数据进行计算
+        // 等待上一次广播任务完成
+        broadcast_wait(handle_row[c_spm_dbflag]);
+        broadcast_wait(handle_col[d_spm_dbflag]);
+
+        // 对广播收到的A的部分子矩阵核B的部分子矩阵进行乘法运算
+        matmul_wrapper(CDBUF(c_spm), CDBUF(d_spm), e_spm, check_val + thread_id,
+                       a_sub_m, nb, b_sub_n);
+
+        // 将每次临时计算的结果进行累加
+        halfv16 v_dst, v_src;
+        for (int i = 0; i < e_spm_num;) {
+            int current_num = ((i + 16) <= e_spm_num) ? 16 : (e_spm_num - i);
+            if (16 == current_num) {
+                // 如果当前计算16个连续的数据要求，调用并行指令
+                simd_load(v_dst, final_spm + i);
+                simd_load(v_src, e_spm + i);
+                v_dst += v_src;
+                simd_store(v_dst, final_spm + i);
+                i += 16;
+            } else {
+                // 对单个数据，进行串行计算
+                *(final_spm + i) += *(e_spm + i);
+                i++;
+            }
+        }
+        // 任务3结束
+    SWAP_FLAG:
+        // 切换双缓冲标记
+        EXDBF(c_spm);
+        EXDBF(d_spm);
+        EXDBF(a_spm);
+        EXDBF(b_spm);
+    }
+    // 从SPM保存C的子矩阵到Global
+    save_sub_block(dataC, final_spm, dev_m, dev_n, a_sub_m, b_sub_n,
+                   b_sub_n * x_pos, a_sub_m * y_pos);
+
+    // 释放在SPM上申请的内存
+    free(e_spm);
+    free(final_spm);
+}
+
+int main() {
+    int i = 0, j = 0, k = 0;
+    // 声明Device端地址
+    // dev_a为输入矩阵，dev_b为权重矩阵，dev_c为计算结果矩阵
+    char *dev_a = NULL;
+    char *dev_b = NULL;
+    char *dev_c = NULL;
+
+    // 设置随机种子
+    srand(100);
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)&dev_a, M * K * sizeof(half));
+    sdaaMalloc((void **)&dev_b, K * N * sizeof(half));
+    sdaaMalloc((void **)&dev_c, M * N * sizeof(half));
+
+    // 分配Host端地址
+    // host_a为输入矩阵，host_b为权重矩阵，host_c为计算结果矩阵
+    // host_c_s为Host模仿矩阵乘计算，计算结果存储矩阵
+    half *host_a = (half *)malloc(M * K * sizeof(half));
+    half *host_b = (half *)malloc(K * N * sizeof(half));
+    half *host_c = (half *)malloc(M * N * sizeof(half));
+
+    // 为Host端输入矩阵进行初始化
+    memset(host_a, 0, M * K * sizeof(half));
+    for (i = 0; i < M; i++) {
+        for (j = 0; j < K; j++) {
+            host_a[i * K + j] = 1.0 * rand() / RAND_MAX * 10.0 - 5;
+        }
+    }
+    // 为Host端输入权重进行初始化
+    memset(host_b, 0, K * N * sizeof(half));
+    for (i = 0; i < K; i++) {
+        for (j = 0; j < N; j++) {
+            host_b[i * N + j] = 1.0 * rand() / RAND_MAX * 0.1 - 0.05;
+        }
+    }
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_a, host_a, M * K * sizeof(half), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_b, host_b, K * N * sizeof(half), sdaaMemcpyHostToDevice);
+
+    // 使用sdaaMalloc为dev_check_val进行空间分配
+    unsigned int *dev_check_val = NULL;
+    sdaaMalloc((void **)&dev_check_val, threadDim * sizeof(unsigned int));
+
+    // 为check_val在host端进行空间分配
+    unsigned int *check_val =
+        (unsigned int *)malloc(threadDim * sizeof(unsigned int));
+
+    summa<<<1>>>(dev_a, dev_b, dev_c, dev_check_val, M, K, N);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端矩阵乘计算结果拷贝到Host端
+    sdaaMemcpy(host_c, dev_c, M * N * sizeof(half), sdaaMemcpyDeviceToHost);
+    // 使用sdaaMemcpy将Device端验证输入参数合法性结果拷贝到Host端
+    sdaaMemcpy(check_val, dev_check_val, threadDim * sizeof(unsigned int),
+               sdaaMemcpyDeviceToHost);
+
+    // 对check结果进行合法性校验，验证失败则打印验证失败日志，否则打印验证成功日志
+    bool check_result = true;
+    for (i = 0; i < threadDim; i++) {
+        if (check_val[i] != 0) {
+            check_result = false;
+            printf("thread %d check_matrmul failed, returns %d\n", i,
+                   *check_val);
+        }
+    }
+
+    if (check_result) {
+        printf("all check_matmul errors checked done\n");
+
+        // 在Host模拟矩阵乘操作，并将结果存放到host_c_s
+        half *host_c_s = (half *)malloc(M * N * sizeof(half));
+        memset(host_c_s, 0, M * N * sizeof(half));
+        for (i = 0; i < M; i++) {
+            for (j = 0; j < N; j++) {
+                for (k = 0; k < K; k++) {
+                    host_c_s[i * N + j] +=
+                        host_a[i * K + k] * host_b[k * N + j];
+                }
+            }
+        }
+        // 将Device端矩阵乘计算结果与Host端计算结果进行对比，验证失败则打印对应日志
+        for (i = 0; i < M * N; i++) {
+            if (((float)host_c[i] - (float)host_c_s[i] > 1.5e-2)) {
+                printf("find mismatching data Pos %d, on line %d, col %d: ace: "
+                       "%f, serial: %f\n",
+                       i, i / N, i % N, (float)host_c[i], (float)host_c_s[i]);
+                break;
+            }
+            if (i == M * N - 1) {
+                printf("SUMMA result compare ok\n");
+            }
+        }
+        // 释放host_c_s空间
+        free(host_c_s);
+    }
+    // 释放在Device端和Host申请的内存
+    free(check_val);
+    sdaaFree(dev_check_val);
+    free(host_c);
+    free(host_b);
+    free(host_a);
+    sdaaFree(dev_c);
+    sdaaFree(dev_b);
+    sdaaFree(dev_a);
+
+    return 0;
+}

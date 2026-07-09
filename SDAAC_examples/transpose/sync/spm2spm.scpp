@@ -1,0 +1,256 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 使用转置接口对SPM内存空间的16 * 16的二维矩阵和64 * 32的二维矩阵进行转置操作。
+// 2. 在Device端完成转置后将转置接口拷贝到Global内存，并将转置接口与Host端模拟的转置结果进行对比。
+
+#include <time.h>
+#include <sdaa_transpose.h>
+using namespace sdaa;
+
+#define SIZE_4B 256
+#define HEIGHT_4B 16
+#define WIDTH_4B 16
+
+#define SIZE_2B 2048
+#define HEIGHT_2B 64
+#define WIDTH_2B 32
+
+#define RAND_SCOP 100
+#define RAND_SCOP_SUB 50
+#define RAND_SEED 100
+#define FLOAT_FACTOR 0.8
+
+__global__ void tanspose_2B(short *g_dst_short, short *g_src_short)
+{
+    // 仅使用0号计算核心进行功能测试
+    if (threadIdx != 0) {
+        return;
+    }
+
+    // 在SPM中申请一段内存空间用于存储原始数据和转置之后的数据
+    short *dst_short = (short *)malloc(SIZE_2B * sizeof(short));
+    short *src_short = (short *)malloc(SIZE_2B * sizeof(short));
+
+    // 将Global内存中的原始矩阵拷贝到SPM内存中
+    memcpy(src_short, g_src_short, SIZE_2B * sizeof(short));
+
+    // 使用阻塞型转置接口完成矩阵转置
+    transpose(dst_short, src_short, HEIGHT_2B, WIDTH_2B, sizeof(short));
+
+    // 将转置结果拷贝到Global内存
+    memcpy(g_dst_short, dst_short, SIZE_2B * sizeof(short));
+
+    // 释放申请的SPM内存空间
+    free(dst_short);
+    free(src_short);
+}
+
+__global__ void tanspose_4B(float *g_dst_float, float *g_src_float)
+{
+    // 仅使用0号计算核心进行功能测试
+    if (threadIdx != 0) {
+        return;
+    }
+
+    // 在SPM中申请一段内存空间用于存储原始数据和转置之后的数据
+    float *dst_float = (float *)malloc(SIZE_4B * sizeof(float));
+    float *src_float = (float *)malloc(SIZE_4B * sizeof(float));
+
+    // 将Global内存中的原始矩阵拷贝到SPM内存中
+    memcpy(src_float, g_src_float, SIZE_4B * sizeof(float));
+
+    // 使用阻塞型转置接口完成矩阵转置
+    transpose(dst_float, src_float, HEIGHT_4B, WIDTH_4B, sizeof(float));
+
+    // 将转置结果拷贝到Global内存
+    memcpy(g_dst_float, dst_float, SIZE_4B * sizeof(float));
+
+    // 释放申请的SPM内存空间
+    free(dst_float);
+    free(src_float);
+}
+
+// 模拟矩阵转置操作
+template<typename T>
+void transpose_simulate(T *dst, T *src, int width, int height)
+{
+    for (int i = 0; i < width; i++) {
+        for (int j = 0; j < height; j++) {
+            dst[i * height + j] = src[j * width + i];
+        }
+    }
+}
+
+void test_4B(int &errnum)
+{
+    // 申请Host端地址
+    float *h_src_float = (float *)malloc(SIZE_4B * sizeof(float));
+    float *h_dst_float = (float *)malloc(SIZE_4B * sizeof(float));
+    float *h_ref_float = (float *)malloc(SIZE_4B * sizeof(float));
+
+    // 定义随机数种子
+    unsigned int local_seed = RAND_SEED;
+
+    // 初始化Host端内存数据
+    for (int i = 0; i < SIZE_4B; i++) {
+        h_src_float[i] = rand_r(&local_seed) % RAND_SCOP * FLOAT_FACTOR -
+                         RAND_SCOP_SUB;
+    }
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    float *d_src_float = NULL;
+    float *d_dst_float = NULL;
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&d_src_float), SIZE_4B * sizeof(float));
+    sdaaMalloc((void **)(&d_dst_float), SIZE_4B * sizeof(float));
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(d_src_float, h_src_float, SIZE_4B * sizeof(float),
+               sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_dst_float, h_dst_float, SIZE_4B * sizeof(float),
+               sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    tanspose_4B<<<1>>>(d_dst_float, d_src_float);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(h_dst_float, d_dst_float, SIZE_4B * sizeof(float),
+               sdaaMemcpyDeviceToHost);
+
+    // 在Host端模拟矩阵转置操作
+    transpose_simulate<float>(h_ref_float, h_src_float, WIDTH_4B, HEIGHT_4B);
+
+    // 将Device端转置结果与模拟结果进行对比
+    for (int i = 0; i < SIZE_4B; i++) {
+        if (h_dst_float[i] != h_ref_float[i]) {
+            printf("h_dst_float[%d]: %f, h_ref_float[%d]: %f\n",
+                   i, h_dst_float[i], i, h_ref_float[i]);
+            errnum++;
+        }
+    }
+
+    // 释放Device端内存
+    sdaaFree(d_dst_float);
+    sdaaFree(d_src_float);
+
+    // 释放Host端内存
+    free(h_ref_float);
+    free(h_dst_float);
+    free(h_src_float);
+}
+
+
+void test_2B(int &errnum)
+{
+    // 申请Host端地址
+    short *h_src_short = (short *)malloc(SIZE_2B * sizeof(short));
+    short *h_dst_short = (short *)malloc(SIZE_2B * sizeof(short));
+    short *h_ref_short = (short *)malloc(SIZE_2B * sizeof(short));
+
+    // 定义随机数种子
+    unsigned int local_seed = RAND_SEED;
+
+    // 初始化Host端内存数据
+    for (int i = 0; i < SIZE_2B; i++) {
+        h_src_short[i] = rand_r(&local_seed) % RAND_SCOP - RAND_SCOP_SUB;
+    }
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    short *d_src_short = NULL;
+    short *d_dst_short = NULL;
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&d_src_short), SIZE_2B * sizeof(short));
+    sdaaMalloc((void **)(&d_dst_short), SIZE_2B * sizeof(short));
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(d_src_short, h_src_short, SIZE_2B * sizeof(short),
+               sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_dst_short, h_dst_short, SIZE_2B * sizeof(short),
+               sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    tanspose_2B<<<1>>>(d_dst_short, d_src_short);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(h_dst_short, d_dst_short, SIZE_2B * sizeof(short),
+               sdaaMemcpyDeviceToHost);
+
+    // 在Host端模拟矩阵转置操作
+    transpose_simulate<short>(h_ref_short, h_src_short, WIDTH_2B, HEIGHT_2B);
+
+    // 将Device端转置结果与模拟结果进行对比
+    for (int i = 0; i < SIZE_2B; i++) {
+        if (h_dst_short[i] != h_ref_short[i]) {
+            printf("h_dst_short[%d]: %d, h_ref_short[%d]: %d\n",
+                   i, h_dst_short[i], i, h_ref_short[i]);
+
+            errnum++;
+        }
+    }
+
+    // 释放Device端内存
+    sdaaFree(d_dst_short);
+    sdaaFree(d_src_short);
+
+    // 释放Host端内存
+    free(h_ref_short);
+    free(h_dst_short);
+    free(h_src_short);
+}
+
+int main()
+{
+    int errnum = 0;
+
+    test_2B(errnum);    // 数据类型为2B的转置测例
+    test_4B(errnum);    // 数据类型为4B的转置测例
+
+    if (errnum == 0) {
+        printf("check success!\n");
+    }
+
+    return 0;
+}

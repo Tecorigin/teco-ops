@@ -1,0 +1,149 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 0号计算核心将数据通过两次非阻塞RMA PUT操作将数据发送到1号计算核心。
+// 3. 1号计算核心将操作结果通过核函数参数返回到Host端。
+// 4. 在Host端对结果进行校验。
+
+using namespace sdaa;
+
+// 使用__local__声明SPM内存空间
+__local__ int local_add[100];
+__local__ int remote_add[100];
+
+__global__ void bar(int *l_addr, int *r_addr) {
+    // 为0号计算核心SPE初始化local_add对应的内存
+    if (threadIdx == 0) {
+        for (int i = 0; i < 100; i++) {
+            local_add[i] = l_addr[i];
+        }
+    }
+
+    // 为1号计算核心SPE初始化remote_add对应的内存
+    if (threadIdx == 1) {
+        for (int i = 0; i < 100; i++) {
+            remote_add[i] = r_addr[i];
+        }
+    }
+
+    // 在全局范围内定义一个RmaHandle类型的变量
+    RmaHandle handle;
+
+    // 在全局范围内执行同步操作
+    sync_threads();
+
+    if (threadIdx == 0) {
+        // 为0号计算核心配置远端ID
+        rma_set_thread_id(handle, 1);
+
+        // 执行非阻塞型RMA GET操作，将1号计算核心remote_add对应的内存拷贝到0号计算核心local_add对应的内存中
+        rma_async_put(local_add, remote_add, 50 * sizeof(int), handle);
+
+        // 执行非阻塞型RMA GET操作，将1号计算核心remote_add对应的内存拷贝到0号计算核心local_add对应的内存中
+        rma_async_put(local_add + 50, remote_add + 50, 50 * sizeof(int), handle);
+
+        // 0号计算核心SPE通过RmaCustomizeMode模式，等待完成非阻塞RMA PUT
+        rma_complete(handle, RmaCustomizeMode);
+    }
+
+    if (threadIdx == 1) {
+        // 为1号计算核心配置计算核心ID，因为0号计算核心向当前计算核心发起非阻塞RMA操作，因此配置计算核心ID为0
+        rma_set_thread_id(handle, 0);
+
+        // 1号计算核心SPE等待完成非阻塞RMA PUT，因为其他从核共向1号从核发起2次RMA操作，因此rmaTime为2。即表示等待2次RMA操作完成
+        rma_wait(handle, 2);
+
+        // 将1号计算核心remote_add对应内存拷贝到r_addr参数中
+        for (int i = 0; i < 100; i++) {
+            r_addr[i] = remote_add[i];
+        }
+    }
+}
+
+int main() {
+    // 分配Host端地址
+    int *h_local_addr = (int *)malloc(100 * sizeof(int));
+    int *h_remote_addr = (int *)malloc(100 * sizeof(int));
+
+    // 为分配的Host地址进行初始化
+    for (int i = 0; i < 100; i++) {
+        *(h_local_addr + i) = i;
+        *(h_remote_addr + i) = 0;
+    }
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    int *d_local_addr = NULL;
+    int *d_remote_addr = NULL;
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&d_local_addr), 100 * sizeof(int));
+    sdaaMalloc((void **)(&d_remote_addr), 100 * sizeof(int));
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(d_local_addr, h_local_addr, 100 * sizeof(int), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_remote_addr, h_remote_addr, 100 * sizeof(int), sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    bar<<<1>>>(d_local_addr, d_remote_addr);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(h_remote_addr, d_remote_addr, 100 * sizeof(int), sdaaMemcpyDeviceToHost);
+
+    // 对计算结果进行验证，验证失败则打印对应日志
+    bool check_flag = true;
+    for (int i = 0; i < 100; i++) {
+        if (h_remote_addr[i] != i) {
+            printf("h_remote_addr check fail, h_remote_addr[%d] = %d\n", i, h_remote_addr[i]);
+            check_flag = false;
+        }
+    }
+
+    // 如果验证成功，则打印对应日志
+    if (check_flag) {
+        printf("rma async check success\n");
+    }
+
+    // 释放Device端内存
+    sdaaFree(d_remote_addr);
+    sdaaFree(d_local_addr);
+
+    // 释放Host端内存
+    free(h_remote_addr);
+    free(h_local_addr);
+    return 0;
+}

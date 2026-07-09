@@ -1,0 +1,60 @@
+using namespace sdaa;
+#define SIZE 67
+__device__ int g_data[SIZE];
+
+__device__ void func()
+{
+    // 仅使用SPE0初始化原始数据
+    if (threadIdx == 0) {
+        for (int i = 0; i < SIZE; i++) {
+            g_data[i] = i;
+        }
+    }
+    // SPE同步，确保所有的SPE都完成了数据的初始化
+    sync_threads();
+
+    // 可用的计算资源超过计算量时，每个SPE承担一次计算
+    if (threadDim >= SIZE) {
+        if (threadIdx < SIZE) {
+            g_data[threadIdx]++;
+        }
+    } else {
+        // 可用计算资源少于计算量时，每个SPE需承担多次计算
+        // 例如当前计算量为67，假如共有32个SPE参与计算。则每个SPE需要至少承担两次计算任务
+        int cal_time = SIZE / threadDim;
+        for (int i = 0; i < cal_time; i++) {
+            g_data[i * threadDim + threadIdx]++;
+        }
+        // 对于剩余的计算量使用部分SPE承担
+       // 例如当前的计算量为67，假如共有32个SPE参与计算，每个SPE计算两次后，还剩余3次。
+        // 则使用0， 1， 2三个SPE完成剩余的计算任务
+        int remain_time = SIZE % threadDim;
+        if ((threadIdx + 1) <= remain_time) {
+            g_data[cal_time * threadDim + threadIdx]++;
+        }
+    }
+
+    // SPE同步，确保所有的SPE都完成了子问题的求解
+    sync_threads();
+
+    // 仅使用SPE0输出计算结果
+    if (threadIdx == 0) {
+        for (int i = 0; i < SIZE; i++) {
+            printf("SPE ID = %ld, g_data[%d] = %d\n", threadIdx, i, g_data[i]);
+        }
+    }
+}
+
+__global__ void kernel()
+{
+    func();
+}
+
+int main()
+{
+    sdaaSetDevice(0);
+    kernel<<<1>>>();
+    sdaaDeviceSynchronize();
+
+    return 0;
+}

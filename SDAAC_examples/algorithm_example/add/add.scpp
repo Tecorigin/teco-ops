@@ -1,0 +1,119 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+
+#include "../common.h"
+
+// 使用sdaa空间名
+using namespace sdaa;
+#define TOTAL_NUM (256 * 32)
+#define FSIZE (TOTAL_NUM * sizeof(float))
+
+// x，y：表示输入的Global地址，z：表示计算结果的Global地址
+__global__ void kernel_add(float *x, float *y, float *z, uint32_t total_num) {
+    // 将所有数据切分为threadDim块，每块含有tile_num个数据，分给不同的SPE去计算
+    uint32_t tile_num = total_num / threadDim;
+    // 计算出tile_num个数据占用多少字节的数据空间
+    uint32_t spm_size = tile_num * sizeof(float);
+    // 在SPE为x，y，z申请SPM存储空间
+    // 使用SPM存储空间可以加快数据的访问速度，提升性能
+    float *spm_x = (float *)malloc(spm_size);
+    float *spm_y = (float *)malloc(spm_size);
+    float *spm_z = (float *)malloc(spm_size);
+    // 使用输入数据x, y的首地址 + threadIdx * tile_num 偏移坐标作为搬运数据的源地址
+    // 对Global存储空间的数据进行切分后，搬运到SPM存储空间
+    memcpy(spm_x, (x + threadIdx * tile_num), spm_size);
+    memcpy(spm_y, (y + threadIdx * tile_num), spm_size);
+
+    // 每个计算核心SPE相隔tile_num个float数据，且循环tile_num次，进行加法计算
+    for (uint32_t i = 0; i < tile_num; i++) {
+        // 将SPM上所有输入数据相加，并将计算结果输出到对应的SPM存储空间
+        spm_z[i] = spm_x[i] + spm_y[i];
+    }
+    // 用输出数据z的首地址 + threadIdx * tile_num 偏移坐标作为搬运数据的目的地址
+    // 将SPM存储空间上的计算结果搬运到Global存储空间
+    memcpy((z + threadIdx * tile_num), spm_z, spm_size);
+}
+
+int main() {
+    int errnum = 0;
+    // 设置0号T1计算设备，用于进行加法计算
+    sdaaSetDevice(0);
+    // 申请主机端输入数据和输出数据的内存空间
+    float *hdata_x = (float *)malloc(FSIZE);
+    float *hdata_y = (float *)malloc(FSIZE);
+    float *hdata_z = (float *)malloc(FSIZE);
+    // 初始化输入数据x，y的值， 初始化方式可以根据实际情况自行选择
+    for (int i = 0; i < TOTAL_NUM; i++) {
+        hdata_x[i] = (float)(i / TOTAL_NUM);
+        hdata_y[i] = (float)sin(i / TOTAL_NUM);
+    }
+    // 定义设备端指针初始化为NULL
+    float *dev_data_x = NULL;
+    float *dev_data_y = NULL;
+    float *dev_data_z = NULL;
+
+    // 申请GLobal存储空间，并返回地址给之前定义的指针
+    sdaaMalloc((void **)&dev_data_x, FSIZE);
+    sdaaMalloc((void **)&dev_data_y, FSIZE);
+    sdaaMalloc((void **)&dev_data_z, FSIZE);
+
+    // 将主机端数据复制到GLobal存储空间；需要配置sdaaMemcpyHostToDevice，数据传输方向是主机端至设备端
+    sdaaMemcpy(dev_data_x, hdata_x, FSIZE, sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_data_y, hdata_y, FSIZE, sdaaMemcpyHostToDevice);
+
+    // 调用Kernel函数，将实际输入数据、输出数据的地址填入函数参数，进行计算
+    kernel_add<<<1>>>(dev_data_x, dev_data_y, dev_data_z, TOTAL_NUM);
+    // 进行同步，等待所有SPE运行完Kernel函数
+    sdaaDeviceSynchronize();
+    // 将计算完成的数据从GLobal搬运到主机端内存
+    sdaaMemcpy(hdata_z, dev_data_z, FSIZE, sdaaMemcpyDeviceToHost);
+
+    // 申请主机端的内存空间，用于存放主机端的加法计算结果
+    float *golden_z = (float *)malloc(FSIZE);
+    for (int i = 0; i < TOTAL_NUM; i++) {
+        // 在主机端执行加法计算
+        golden_z[i] = hdata_x[i] + hdata_y[i];
+    }
+
+    // 调用teco 提供的精度验证接口，第1个参数是搬运到Host 端的 Device计算出来的
+    // 数据的地址。 第2个是CPU 计算出的数据的地址。第3个参数是数据类型。
+    // 第4个参数是数据总数。
+    tecoAccuracyValidate(hdata_z, golden_z, TECOACCURACY_DATA_FLOAT, TOTAL_NUM);
+
+    // 数据使用完后，释放主机端内存
+    free(hdata_x);
+    free(hdata_y);
+    free(hdata_z);
+    free(golden_z);
+    // 数据使用完后，释放Global存储空间
+    sdaaFree(dev_data_x);
+    sdaaFree(dev_data_y);
+    sdaaFree(dev_data_z);
+    CHECK();
+
+    return 0;
+}

@@ -1,0 +1,82 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 对global 内存上的数据进行原子比较替换操作，并返回旧值。
+// 3. 将原子操作后的结果数据，复制到Host端。
+
+#include <sdaa_atomic.h>
+using namespace sdaa;
+
+#define DSIZE (2)
+
+__global__ void atomic_op(int64_t *a) 
+{
+    if(threadIdx == 0)
+    {
+        // 只有线程0 对a[0]进行原子比较操作，返回旧值到a[1]。
+        a[1] = atomic_cas(&a[0], 2, 4);
+    }
+}
+
+int main() 
+{
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 初始化源数据数组
+    int64_t host_data[DSIZE] = {2, 0};
+    int size64 = DSIZE * sizeof(int64_t);
+
+    // 声明Device端地址
+    int64_t *dev_data = NULL;
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&dev_data), size64);
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_data, host_data, size64, sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    atomic_op<<<1>>>(dev_data);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(host_data, dev_data, size64, sdaaMemcpyDeviceToHost);
+
+    // 查看原子操作结果是否正确
+    if (host_data[0] != 4 || host_data[1] != 2) {
+        printf("atomic add error: %lu, %lu!\n", host_data[0], host_data[1]);
+    }
+
+    // 释放Device端内存
+    sdaaFree(dev_data);
+    return 0;
+}

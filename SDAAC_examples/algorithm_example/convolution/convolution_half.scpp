@@ -1,0 +1,280 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+//  场景介绍：
+//  1.
+//  对half类型的矩阵运行卷积运算。并将计算结果传回Host，与Host模拟的卷积结果进行
+//  对比
+
+//  2.
+//  卷积利用matmul 接口实现，实现方程如下：
+//  对于一个样例（N=1） [k * (c*r*s)] x [(c*r*s) * (p*q)] = k * p * q
+//  p = (h - r + 2* padding)/stride + 1
+//  q = (w - s + 2* padding)/stride + 1
+//  k 输出通道；c 输入通道；r 卷积核行数；s 卷积核列数；
+//  p 输出特征图行数；q 输出特征图列数；h 输入特征图行数； w 输入特征图列数
+//  由公式可知， 权重数据转化成矩阵 A，输入特征数据转化成矩阵B。
+//  需要对输入特征图进行数据膨胀为原来的 r*s 倍
+
+//  3.
+//  使用check_matmul对输入矩阵和权重矩阵进行合法性校验。并将校验结果传回Host
+
+#include <sdaa_matmul.h>
+#include <sdaa_runtime.h>
+#include <simd.h>
+#include <stdio.h>
+#include <time.h>
+using namespace sdaa;
+
+#define N 1        // 样例数目
+#define C 32       // 输入通道数
+#define H 5        // 输入特征图行数
+#define W 5        // 输入特征图列数
+#define K 256      // 输出通道数
+#define R 3        // 卷积核行数
+#define S 3        // 卷积核列数
+#define PAD 0      // 补充数目
+#define STRIDE 1   // 步长数目
+#define DILATION 1 // 膨胀数目
+// 计算输出特征图的行数和列数
+#define P ((H + 2 * PAD - R) / STRIDE + 1)
+#define Q ((W + 2 * PAD - S) / STRIDE + 1)
+
+// 卷积前向算法核函数
+// data_act  输入特征图数据地址
+// data_wgt  权重数据地址
+// data_out  输出特征图数据地址
+// check_val 检验值数据地址
+// n         输入样例数
+// c         输入通道数目
+// h         输入特征图行数
+// w         输入特征图列数
+// k         输出通道数目
+// r         卷积核行数
+// s         卷积核列数
+// p         输出特征图行数
+// q         输出特征图列数
+// pad       填充数目
+// stride    步长数目
+// dilation  膨胀数目
+__global__ void conv_forward(half *data_act, half *data_wgt, half *data_out,
+                             uint *check_val, uint n, uint c, uint h, uint w,
+                             uint k, uint r, uint s, uint p, uint q, int pad,
+                             uint stride, uint dilation) {
+    uint i;
+    uint ic, ir, is, irs, jp;
+    // 输入特征图膨胀后， 用于矩阵乘的half数据大小
+    uint size_act = c * r * s * p * q;
+    // 矩阵乘 A输入列数（B输入行数）k
+    uint size_k = c * r * s;
+    // 矩阵乘 B 输入列数 n
+    uint size_n = p * q;
+    // 在SPM中申请一块临时空间用于存放膨胀后的 输入特征数据
+    half *data_tmp = (half *)malloc(size_act * sizeof(half));
+
+    // 在 输出通道 K维度（即转化后的 矩阵A的
+    // m维度），分割成32份在32个从核上并行计算
+    uint k_group = (k + 31) / 32;
+    // 计算权重数据在 输出通道K（m） 维度上的偏移量
+    uint wgt_offset = size_k * k_group * threadIdx;
+    // 计算输出数据在 输出通道K（m） 维度上的偏移量
+    uint out_offset = size_n * k_group * threadIdx;
+
+    // 对输入特征图进行数据膨胀，对卷积核对应的数据转化成 矩阵B 的列数据
+    // 先循环矩阵B 的行数 size_k
+    for (i = 0; i < size_k; i++) {
+        // 计算对应的输入特征图的输入通道 c坐标
+        ic = i / (r * s);
+        irs = i % (r * s);
+        // 计算输入特征图膨胀r倍时的坐标
+        ir = irs / s;
+        // 计算输入特征图膨胀s倍时的坐标
+        is = irs % s;
+        // 循环矩阵B的列数size_n=p*q, 循环p次，每次复制q个数据
+        for (jp = 0; jp < p; jp++) {
+            // 根据规律，输入特征图的连续 q 个数据，可以按行复制到膨胀后的数据里
+            memcpy((data_tmp + i * size_n + jp * q),
+                   (data_act + ic * h * w + ir * w + is + jp * w),
+                   q * sizeof(half));
+        }
+    }
+    // 检查每次做矩阵乘的 数据参数是否正确，并返回结果
+    *check_val = check_matmul(MatmulHalfToHalf, (data_out + out_offset),
+                              (data_wgt + wgt_offset), data_tmp, k_group,
+                              size_k, size_n);
+    // 根据之前计算好的偏移，每个从核分别做矩阵乘计算
+    matmul(MatmulHalfToHalf, (data_out + out_offset), (data_wgt + wgt_offset),
+           data_tmp, k_group, size_k, size_n);
+    free(data_tmp);
+}
+
+int main() {
+    // 初始化资源
+    int i, j, l;
+    half *dev_act = NULL;
+    half *dev_wgt = NULL;
+    half *dev_out = NULL;
+    uint act_size, wgt_size, out_size;
+    srand(time(NULL));
+    // 使用0号计算核心阵列
+    sdaaSetDevice(0);
+    // 计算输入特征图的大小
+    act_size = N * C * H * W;
+    // 计算权重数据的大小
+    wgt_size = K * C * R * S;
+    // 计算输出特征图的大小
+    out_size = N * K * P * Q;
+    // 在device上申请内存资源，存放特征图和权重数据
+    sdaaMalloc((void **)&dev_act, act_size * sizeof(half));
+    sdaaMalloc((void **)&dev_wgt, wgt_size * sizeof(half));
+    sdaaMalloc((void **)&dev_out, out_size * sizeof(half));
+    // 在host上申请内存资源，存放对比数据的特征图和权重数据
+    half *host_act = (half *)malloc(act_size * sizeof(half));
+    half *host_wgt = (half *)malloc(wgt_size * sizeof(half));
+    half *host_out = (half *)malloc(out_size * sizeof(half));
+    half *gold_out = (half *)malloc(out_size * sizeof(half));
+    // 初始化主机端的输入特征图数据
+    memset(host_act, 0, act_size * sizeof(half));
+    for (i = 0; i < act_size; i++) {
+        host_act[i] = 1.0 * rand() / RAND_MAX - 0.5;
+    }
+    // 初始化主机端的权重数据
+    memset(host_wgt, 0, wgt_size * sizeof(half));
+    for (i = 0; i < wgt_size; i++) {
+        host_wgt[i] = 1.0 * rand() / RAND_MAX * 0.1 - 0.05;
+    }
+    // 将主机端的输入特征数据和权重数据复制到device上
+    sdaaMemcpy(dev_act, host_act, act_size * sizeof(half),
+               sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_wgt, host_wgt, wgt_size * sizeof(half),
+               sdaaMemcpyHostToDevice);
+
+    // 为检查值在host和device 上申请内存空间
+    unsigned int *dev_check_val = NULL;
+    sdaaMalloc((void **)&dev_check_val, sizeof(unsigned int));
+    unsigned int *check_val = (unsigned int *)malloc(sizeof(unsigned int));
+
+    // 打印卷积运行的各种参数数据
+    printf("CONV N:%d C:%d H:%d W:%d K:%d R:%d S:%d P:%d Q:%d Pad:%d \
+    Stride:%d Dilation:%d \n",
+           N, C, H, W, K, R, S, P, Q, PAD, STRIDE, DILATION);
+
+    // 运行卷积核函数
+    conv_forward<<<1>>>(dev_act, dev_wgt, dev_out, dev_check_val, N, C, H, W, K,
+                        R, S, P, Q, PAD, STRIDE, DILATION);
+    sdaaDeviceSynchronize();
+    // 将卷积核函数运行的结果复制到host端
+    sdaaMemcpy(host_out, dev_out, out_size * sizeof(half),
+               sdaaMemcpyDeviceToHost);
+    // 初始化对比数据的输出
+    memset(gold_out, 0, out_size * sizeof(half));
+
+    half accumulator;
+    int GEMM_M, GEMM_K, GEMM_N, act_id, wgt_id, out_id;
+    int n, c, h, w, k, r, s, p, q, j_res, l_res;
+    // 计算host端卷积算法的 m， k， n
+    GEMM_M = K;
+    GEMM_N = N * P * Q;
+    GEMM_K = C * R * S;
+    int total;
+    // 先循环 A矩阵的 m 维度
+    for (i = 0; i < GEMM_M; i++) {
+        // 维度坐标即为输出通道坐标
+        k = i;
+        // 循环 B矩阵n 维度
+        for (j = 0; j < GEMM_N; j++) {
+            // 初始化卷积核累加结果
+            accumulator = 0.0;
+            // 计算样本batch数坐标
+            n = j / (P * Q);
+            j_res = j % (P * Q);
+            // 计算输出特征图行数坐标
+            p = j_res / Q;
+            // 计算输出特征图列数坐标
+            q = j_res % Q;
+            // 循环 A矩阵 k 维度
+            for (l = 0; l < GEMM_K; l++) {
+                // 计算输入通道坐标
+                c = l / (R * S);
+                l_res = l % (R * S);
+                // 计算卷积核行数坐标
+                r = l_res / S;
+                // 计算卷积核列数坐标
+                s = l_res % S;
+                // 计算输入特征图行数坐标
+                h = p * STRIDE - PAD + r;
+                // 计算输入特征图列数坐标
+                w = q * STRIDE - PAD + s;
+                // 计算矩阵乘对应的输入特征图的 4 维坐标
+                act_id = n * C * H * W + c * H * W + h * W + w;
+                // 计算矩阵乘对应的权重数据的 4 维坐标
+                wgt_id = k * C * R * S + c * R * S + r * S + s;
+                // 计算矩阵乘对应的输出特征图的 4 维坐标
+                out_id = n * K * P * Q + k * P * Q + p * Q + q;
+                // 将 矩阵乘的K维度（即卷积核）的数据进行乘和累加
+                accumulator = accumulator + host_act[act_id] * host_wgt[wgt_id];
+                gold_out[out_id] = accumulator;
+            }
+        }
+    }
+
+    // 循环对比所有的device端和host端的计算结果，并统计所有的不符合的结果
+    total = 0;
+    for (i = 0; i < out_size; i++) {
+        if ((host_out[i] - gold_out[i] > 1e-1) ||
+            (host_out[i] - gold_out[i] < -1e-1)) {
+            total++;
+            printf(" device: %f, golden: %f   mismatch index:%d\n",
+                   (float)host_out[i], (float)gold_out[i], i);
+        }
+    }
+    printf("total mismatch : %d\n", total);
+    // 将矩阵乘的检查节后 复制到 host 端
+    sdaaMemcpy(check_val, dev_check_val, sizeof(unsigned int),
+               sdaaMemcpyDeviceToHost);
+    if (*check_val == 0) {
+        printf("check_matrix_mul passed! \n");
+    } else {
+        printf("check_matrix_mul fail!  returns %d\n", *check_val);
+    }
+
+    // 释放所有的申请内存空间
+    free(check_val);
+    sdaaFree(dev_check_val);
+    free(gold_out);
+    free(host_out);
+    free(host_wgt);
+    free(host_act);
+    sdaaFree(dev_out);
+    sdaaFree(dev_wgt);
+    sdaaFree(dev_act);
+
+    return 0;
+}

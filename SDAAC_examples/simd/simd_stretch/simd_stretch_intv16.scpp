@@ -1,0 +1,81 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 在设备端,将32位整型标量ra复制成16个相同元素并组成新的向量类型并返回。
+// 3. 在Host端对结果进行校验。
+
+#define COUNT 16
+__global__ void test(int a, int *b) {
+    intv16 vc_dst;
+    vc_dst = simd_stretch(a);
+    simd_store(vc_dst, b);
+}
+
+int main() {
+    //  配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+    int src = 3;
+    // 分配Host端地址
+    int *refer = (int *)malloc(sizeof(int) * COUNT);
+    int *realout = (int *)malloc(sizeof(int) * COUNT);
+    //  计算host端参考结果
+    for (int i = 0; i < COUNT; i++) {
+        realout[i] = src;
+    }
+    //  声明Device端地址
+    int * dev_args = NULL;
+    //  使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&dev_args), sizeof(int) * COUNT);
+    //  启动核函数调用
+    test<<<1>>>(src, dev_args);
+    //  等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+    //  使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(refer, dev_args, COUNT * sizeof(int), sdaaMemcpyDeviceToHost);
+
+    //  打印设备端处理完成的数据
+    for (int i = 0; i < COUNT; i++) {
+        if (realout[i] != refer[i]) {
+            printf("\n\tId %-2d(incorrect):realout = %d, refer = %d\n", i,
+                realout[i], refer[i]);
+        } else {
+            printf("\n\tId %-2d(ok):realout = %d, refer = %d\n", i,
+                realout[i], refer[i]);
+        }
+    }
+    //  释放Device端内存
+    sdaaFree(dev_args);
+    //  释放host端内存
+    free(refer);
+    free(realout);
+    return 0;
+}

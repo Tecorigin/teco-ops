@@ -1,0 +1,109 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. a_src的符号位与b_src的指数和尾数拼接后结果赋值c_dst，操作结果通过核函数参数返回到Host端。
+// 3. 在Host端对结果进行校验。
+
+#define COUNT 16
+
+__global__ void test(float *a_src, float *b_src, float *c_dst) {
+    floatv16 va_src, vb_src, vc_dst;
+    simd_load(va_src, a_src);
+    simd_load(vb_src, b_src);
+    vc_dst = simd_copy_sign(va_src, vb_src);
+    simd_store(vc_dst, c_dst);
+}
+
+//  计算数据
+__attribute__((aligned(64))) float a_src[16] = {
+    -1611111.0, -15111111.0, -14111111.0, -1300000.0, 1.000002, 1.000001,
+    1.000000,   9147258.0,   -8147258.0,  -7258369.0, -6.00000, -5.00000,
+    0.000004,   0.00003,     22222222.0,  0.000001};
+__attribute__((aligned(64))) float b_src[16] = {
+    10.0,         0.000020,     0.000003,   4000000.0, -5.0,   -0.111116,
+    -777777770.0, -655580.0,    -7777790.0, -100.0,    -110.0, -77777120.0,
+    130.0,        7777777140.0, 99999150.0, 8888160.0};
+
+int main() {
+    // 分配Host端地址
+    float *realout = (float *)malloc(sizeof(float) * COUNT);
+    float *refer = (float *)malloc(sizeof(float) * COUNT);
+    //  计算host端参考结果
+    unsigned int ptr1, ptr2;
+    for (int i = 0; i < COUNT; i++) {
+        ptr1 = *(unsigned int *)&a_src[i] >> (sizeof(float) * 8 - 1);
+        ptr2 = *(unsigned int *)&b_src[i] >> (sizeof(float) * 8 - 1);
+        if (ptr1 ^ ptr2) {
+            //  输入的符号位是负的。
+            refer[i] = b_src[i] * (-1);
+            continue;
+        }
+        refer[i] = b_src[i];
+    }
+
+    //  配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+    //  声明Device端地址
+    float *dev_input1 = NULL;
+    float *dev_input2 = NULL;
+    float *dev_out = NULL;
+    //  使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&dev_input1), COUNT * sizeof(float));
+    sdaaMalloc((void **)(&dev_input2), COUNT * sizeof(float));
+    sdaaMalloc((void **)(&dev_out), COUNT * sizeof(float));
+    //  使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_input1, a_src, COUNT * sizeof(float),
+                               sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_input2, b_src, COUNT * sizeof(float),
+                               sdaaMemcpyHostToDevice);
+    //  启动核函数调用
+    test<<<1>>>(dev_input1, dev_input2, dev_out);
+    //  等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+    //  使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(realout, dev_out, COUNT * sizeof(float),
+                               sdaaMemcpyDeviceToHost);
+    //  打印设备端处理完成的数据
+    for (int i = 0; i < COUNT; i++) {
+        printf("\n\tId %-2d realout = %f, refer = %f\n", i,
+                realout[i], refer[i]);
+    }
+    //  释放Device端内存
+    sdaaFree(dev_input1);
+    sdaaFree(dev_input2);
+    sdaaFree(dev_out);
+    //  释放host端内存
+    free(realout);
+    free(refer);
+
+    return 0;
+}

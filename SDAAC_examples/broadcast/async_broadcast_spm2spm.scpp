@@ -1,0 +1,119 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 在Device端先将原始数据拷贝到1号SPE内，然后通过广播接口将数据拷贝到其他计算
+//    核心。
+// 3. 完成广播数据搬运后，将数据拷贝到Host端。
+// 4. 在Host端对数据搬运结果与预期结果进行对比。
+
+using namespace sdaa;
+
+#define NUM_PER_THREAD 2   // 每个SPE的数据量
+#define THREAD_CNT 16      // 设置多少个SPE参与本次广播
+
+#define NUM NUM_PER_THREAD * THREAD_CNT    // 总数据量
+
+__local__ int thread_data[NUM_PER_THREAD];    // 定义SPM存储空间
+
+__global__ void broadcast(int *data)
+{
+    // 计算每个SPE需要拷贝的数据量
+    const size_t local_size = NUM_PER_THREAD * sizeof(int);
+
+    // 将源数据切分拷贝到SPM存储空间
+    memcpy(thread_data, data + NUM_PER_THREAD * threadIdx, local_size);
+
+    ThreadGroup thread_group(0xFFFF);
+    BroadcastHandle handle(&thread_group);
+    // 定义完句柄后执行一次同步操作
+    sync_threads();
+    // 将SPE1中的数据广播给其他计算核心
+    broadcast_async(thread_data, thread_data, local_size, 1, BroadcastSpmToSpm,
+                    handle);
+
+    broadcast_wait(handle);
+
+    // 广播完成后将广播组内计算核心收到的数据拷贝到Global存储空间
+    if (thread_group_is_included(thread_group, threadIdx)) {
+        memcpy(data + NUM_PER_THREAD * threadIdx, thread_data, local_size);
+    }
+}
+
+int main() {
+    // 分配Host端地址
+    int *data = (int *)malloc(NUM * sizeof(int));
+    int *target_data = (int *)malloc(NUM * sizeof(int));
+
+    // 为分配的Host地址进行初始化
+    for (int i = 0; i < NUM; i++) {
+        data[i] = i / NUM_PER_THREAD;
+        target_data[i] = 1;  // target_data中存储预期数据
+    }
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    int *dev_data = NULL;
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&dev_data), NUM * sizeof(int));
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_data, data, NUM * sizeof(int), sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    broadcast<<<1>>>(dev_data);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(data, dev_data, NUM * sizeof(int), sdaaMemcpyDeviceToHost);
+
+    // // 对数据搬运结果进行验证
+    int errnum = 0;
+    for (unsigned i = 0; i < NUM; i++) {
+        if (data[i] != target_data[i]) {
+            errnum++;
+        }
+    }
+
+    printf("errnum = %d\n", errnum);
+
+    // 释放Device端内存
+    sdaaFree(dev_data);
+
+    // 释放Host端内存
+    free(target_data);
+    free(data);
+    return 0;
+}

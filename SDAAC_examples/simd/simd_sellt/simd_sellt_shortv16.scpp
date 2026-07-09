@@ -1,0 +1,113 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 在设备端,逐个元素判断16位整型向量类型参数va，如果某元素小于0，则返回vb对应元素的值；否则返回vc对应元素的值。
+// 3. 在Host端对结果进行校验。
+
+#define COUNT 32
+//  计算数据
+__attribute__((aligned(64))) short input[32] = {0, 0, 0, 0, 1, 0, 1, 0,
+                                              1, 0, 1, 0, 1, 0, 1, 0,
+                                              0, 0, 0, 0, 1, 0, 1, 0,
+                                              1, 0, 1, 0, 1, 0, 1, 0}; 
+__attribute__((aligned(64))) short ret1[32] = {2, 2, 2, 2, 2, 2, 2, 2,
+                                             2, 2, 2, 2, 2, 2, 2, 2,
+                                             2, 2, 2, 2, 2, 2, 2, 2,
+                                             2, 2, 2, 2, 2, 2, 2, 2}; 
+__attribute__((aligned(64))) short ret2[32] = {-1, -1, -1, -1, -1, -1, -1, -1, 
+                                             -1, -1, -1, -1, -1, -1, -1, -1,
+                                             -1, -1, -1, -1, -1, -1, -1, -1, 
+                                             -1, -1, -1, -1, -1, -1, -1, -1};
+
+__global__ void test(short *a, short *b, short *c, short *d) {
+    shortv32 va_src, vb_ret, vc_ret, vd_dst;
+    simd_load(va_src, a);
+    simd_load(vb_ret, b);
+    simd_load(vc_ret, c);
+    vd_dst = simd_sellt(va_src, vb_ret, vc_ret);
+    simd_store(vd_dst, d);
+}
+
+int main() {
+    //  配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+    //  声明Device端地址 
+    short *dev_a = NULL;
+    short *dev_b = NULL;
+    short *dev_c = NULL;
+    short *dev_d = NULL;
+    //  使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&dev_a), COUNT * sizeof(short));
+    sdaaMalloc((void **)(&dev_b), COUNT * sizeof(short));
+    sdaaMalloc((void **)(&dev_c), COUNT * sizeof(short));
+    sdaaMalloc((void **)(&dev_d), COUNT * sizeof(short));
+    // 分配Host端地址
+    short* realout = (short*)malloc(COUNT * sizeof(short));
+    short* refout = (short*)malloc(COUNT * sizeof(short));
+   // 为分配的Host地址进行初始化
+    for (int i = 0; i < COUNT; i++) {
+        if (input[i] < 0) {
+            realout[i] = ret1[i];
+        } else {
+            realout[i] = ret2[i];
+        }   
+    } 
+    //  使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(
+        dev_a, input, COUNT * sizeof(short), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(
+        dev_b, ret1, COUNT * sizeof(short), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(
+        dev_c, ret2, COUNT * sizeof(short), sdaaMemcpyHostToDevice);
+    //  启动核函数调用
+    test<<<1>>>(dev_a, dev_b, dev_c, dev_d);
+    //  等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+    //  使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(refout, dev_d, COUNT * sizeof(short),
+                sdaaMemcpyDeviceToHost);
+    //  打印设备端处理完成的数据
+    for (int i = 0; i < COUNT; i++) {
+        printf("\n\tId %-2d realout = %d, referout = %d\n", i,
+                realout[i], refout[i]);
+    }
+    //  释放Device端内存
+    sdaaFree(dev_a);
+    sdaaFree(dev_b);
+    sdaaFree(dev_c);
+    sdaaFree(dev_d);
+    //  释放host端内存
+    free(realout);
+    free(refout);
+
+    return 0;
+}

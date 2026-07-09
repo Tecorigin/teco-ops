@@ -1,0 +1,77 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Device端分配SPM空间并初始化
+// 2. 将初始化的SPM变量进行打印输出
+
+__device__ void print_val(int *ta, int *tb, int *tc) {
+    printf("ta = %d, tb = %d, tc = %d\n", *ta, *tb, *tc);
+}
+
+__global__ void func() {
+    // 只使用0号计算核心
+    if (threadIdx != 0) {
+        return;
+    }
+
+    // 从高地址向低地址方向分配SPM内存
+    int *ta = (int *)malloc(4, AddressHighToLow);
+
+    // 从低地址向高地址方向分配SPM内存
+    int *tb = (int *)malloc(4);
+    int *tc = (int *)malloc(4, AddressLowToHigh);
+
+    // init malloc values.
+    ta[0] = 1;
+    tb[0] = 2;
+    tc[0] = 3;
+
+    // 数据打印
+    print_val(ta, tb, tc);
+
+    // 释放分配的SPM内存
+    free(ta);
+    free(tb);
+    free(tc);
+}
+
+int main() {
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 启动核函数调用
+    func<<<1>>>();
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    return 0;
+}

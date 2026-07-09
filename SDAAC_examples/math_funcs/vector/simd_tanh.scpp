@@ -1,0 +1,98 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端
+// 2. 在Device端对原始数据计算双曲正切，并将计算结果传回Host端
+// 3. 在Host对计算结果进行输出
+ 
+#define SIZE 16
+
+__global__ void vtanh_func(float *input, float *result) {
+    // 使用0号计算核心进行数据处理
+    if (threadIdx != 0) {
+        return;
+    }
+
+    floatv16 res;
+    floatv16 ori_data;
+
+    // 将数组装入到向量类型的变量中
+    simd_load(ori_data, input);
+
+    // 计算双曲正切
+    res = simd_tanh(ori_data);
+
+    // 将计算结果存储到数组中
+    simd_store(res, result);
+}
+
+int main() {
+    // Host端定义数据源
+    float h_input[] = {-0.230572, -6.429384, -1.053892,  -7.954086,
+                       1.077878,  -0.118896, 0.146349,   -2.597959,
+                       5.954086,  0.484447,  -10.954086, -0.368195,
+                       -0.208595, -6.954086, 0.192926,   -7.954086};
+    // 定义结果数组
+    float h_result[SIZE] = {0};
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址，d_input存储输入源数据，d_result存储计算结果
+    float *d_input = NULL;
+    float *d_result = NULL;
+
+    // 使用sdaaMalloc为Device端地址分配Global内存
+    sdaaMalloc((void **)(&d_input), SIZE * sizeof(float));
+    sdaaMalloc((void **)(&d_result), SIZE * sizeof(float));
+
+    // 使用sdaaMemcpy将Host端内存数据拷贝到Device端
+    sdaaMemcpy(d_input, h_input, SIZE * sizeof(float), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_result, h_result, SIZE * sizeof(float), sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    vtanh_func<<<1>>>(d_input, d_result);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    sdaaMemcpy(h_result, d_result, SIZE * sizeof(float), sdaaMemcpyDeviceToHost);
+
+    for (int i = 0; i < SIZE; i++) {
+        printf("res[%d] = %e\n", i, h_result[i]);
+    }
+
+    // 释放在Device端申请的内存
+    sdaaFree(d_result);
+    sdaaFree(d_input);
+
+    return 0;
+}

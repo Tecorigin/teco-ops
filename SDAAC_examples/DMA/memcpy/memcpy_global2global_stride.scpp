@@ -1,0 +1,158 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端申请三块内存
+//    h_src：数据搬运的源地址
+//    h_dst：存储Device端跨步数据搬运结果的目的地址
+//    h_ref：在Host端模拟跨步数据搬运接口的参考结果地址
+// 2. 将数据搬运的源地址内存和存储数据搬运结果的目的结果内存拷贝到设备端
+// 3. 在设备端使用memcpy的跨步功能进行跨步数据搬运，并将数据搬运结果拷贝到d_dst内
+// 4. 将Device端完成的跨步数据搬运结果与在Host端模拟的结果进行对比。
+
+#include <stdio.h>
+#include <stdlib.h>
+using namespace sdaa;
+
+#define SIZE 200
+#define STRIDE 4
+#define SECTION 4
+#define SECTION_NUM 20
+__device__ short g_dst[SIZE];
+__device__ short g_src[SIZE];
+
+__global__ void func(short *d_dst, short *d_src)
+{
+    // 仅使用0号SPE完成本次跨步数据搬运
+    if (threadIdx != 0) {
+        return;
+    }
+
+    for (int i = 0; i < SIZE; i++) {
+        g_src[i] = d_src[i];
+        g_dst[i] = d_dst[i];
+    }
+
+    // 定义Stride跨步对象
+    Stride stride(SECTION_NUM, STRIDE * sizeof(short));
+
+    // 在跨步数据搬运前使用check_memcpy对输入参数进行合法性检查
+    unsigned int check_res = check_memcpy_stride(g_dst, g_src,
+                                        SECTION * sizeof(short), stride);
+    if (check_res == MEMCPY_SUCC) {
+        // 参数合法则进行跨步数据搬运
+        memcpy_stride(g_dst, g_src, SECTION * sizeof(short), stride);
+    }
+
+    // 将数据搬运结果拷贝到d_dst数组内
+    for (int i = 0; i < SIZE; i++) {
+        d_dst[i] = g_dst[i];
+    }
+}
+
+// Host端模拟跨步操作
+void dma_stride(short *dst, short *src)
+{
+    int dst_idx = 0;
+    int src_idx = 0;
+
+    for (int i = 0; i < SECTION_NUM; i++) {
+        for (int j = 0; j < SECTION; j++) {
+            dst[dst_idx++] = src[src_idx++];
+        }
+        dst_idx += STRIDE;
+        src_idx += STRIDE;
+    }
+}
+
+int main()
+{
+    // 定义Host端原数据数组、目的数据数组和接口对比数组
+    short h_src[SIZE];
+    short h_dst[SIZE];
+    short h_ref[SIZE];
+
+    short b_src = 1;
+    short b_dst = SIZE;
+    // 初始化Host端数据
+    for (int i = 0; i < SIZE; i++) {
+        h_src[i] = b_src++;
+        h_dst[i] = b_dst;
+        h_ref[i] = b_dst--;
+    }
+
+    // 使用0号计算核心阵列作为计算资源
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    short *d_src = NULL;
+    short *d_dst = NULL;
+
+    // 为设备端地址分配内存空间
+    sdaaMalloc((void **)(&d_src), SIZE * sizeof(short));
+    sdaaMalloc((void **)(&d_dst), SIZE * sizeof(short));
+
+    // 将Host端数据拷贝到设备端
+    sdaaMemcpy(d_src, h_src, SIZE * sizeof(short), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_dst, h_dst, SIZE * sizeof(short), sdaaMemcpyHostToDevice);
+
+    // 核函数调用
+    func<<<1>>>(d_dst, d_src);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 将数据拷贝到Host端
+    sdaaMemcpy(h_dst, d_dst, SIZE * sizeof(short), sdaaMemcpyDeviceToHost);
+
+    // 在Host端模拟跨步操作
+    dma_stride(h_ref, h_src);
+
+    // 将Device端跨步操作结果与Host端模拟结果进行对比
+    int err_num = 0;
+    for (int i = 0; i < SIZE; i++) {
+        if (h_dst[i] == h_ref[i]) {
+            continue;
+        }
+
+        printf("%d\t%d\t%d\t%d\n", i, h_dst[i], h_src[i], h_ref[i]);
+        err_num++;
+    }
+
+    if (err_num == 0) {
+        printf("host printf check: errnum 0\n");
+    }
+
+    // 释放Device端申请的内存
+    sdaaFree(d_dst);
+    sdaaFree(d_src);
+
+    return 0;
+}

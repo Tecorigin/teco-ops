@@ -1,0 +1,162 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 以0号SPE为root节点进行Global存储到SPM存储的跨步广播数据搬运。
+// 3. 完成数据搬运后将结果与模拟结果进行对比。
+// 4. 将对比结果传回Host端并进行打印。
+
+using namespace sdaa;
+
+#define SPE_NUM 32    // 设置多少个SPE参与本次广播
+#define SIZE 22528    // (stride + section) * section_num
+
+// 模拟跨步数据搬运
+__device__ void simulate_stride(int *dst, int *src, int section_num,
+                                int section, int stride)
+{
+    int dst_idx = 0;
+    int src_idx = 0;
+
+    for (int i = 0; i < section_num; i++) {
+        for (int j = 0; j < section; j++) {
+            dst[dst_idx++] = src[src_idx++];
+        }
+        src_idx += stride;
+    }
+}
+
+// 模拟结果与广播结果进行对比，并更新errnum
+__device__ void compare_and_refresh_errnum(int *src, int *data,
+                                           int *data_reference,
+                                           int *errnum, int size,
+                                           int section_num,
+                                           int section, int gm_stride)
+{
+    simulate_stride(data_reference, src, section_num, section,
+                    gm_stride);
+
+    for (int i = 0; i < size; i++) {
+        if (data[i] != data_reference[i]) {
+            errnum[threadIdx]++;
+        }
+    }
+}
+
+__global__ void func(int *src, int *errnum)
+{
+    // 定义跨步参数
+    const int section = 11;          // 数据搬运单元
+    const int gm_stride = 11;        // Global存储空间的跨步
+    const int section_num = 1024;    // 数据搬运单元的数量
+
+    // 计算搬运到SPM存储空间的总的数据量
+    unsigned long size = section_num * section;
+    // 使用malloc在SPM上开辟目的数据存储空间
+    int *spm_dst = (int *)malloc(size * sizeof(int));
+    // 使用malloc在SPM上开辟参考数据存储空间
+    int *spm_dst_refernece = (int *)malloc(size * sizeof(int));
+    // 初始化目的数据存储空间
+    for (int i = 0; i < size; i++) {
+        spm_dst[i] = 0;
+    }
+
+    // 定义Stride跨步参数
+    Stride stride(section_num, gm_stride * sizeof(int));
+    // 定义handle句柄
+    BroadcastHandle handle(&stride);
+    // 定义完句柄后执行一次同步操作
+    sync_threads();
+
+    // 执行同步广播操作
+    broadcast(spm_dst, src, section * sizeof(int), 0, BroadcastGlobalToSpm,
+              handle);
+
+    // 模拟参考输出，并与广播结果进行对比
+    compare_and_refresh_errnum(src, spm_dst, spm_dst_refernece, errnum, size,
+                               section_num, section, gm_stride);
+
+    // 释放申请的SPM存储
+    free(spm_dst_refernece);
+    free(spm_dst);
+}
+
+int main()
+{
+    // 在Host定义源数据存储数组及errnum数组
+    int errnum = 0;
+    int h_src[SIZE];
+    int h_errnum[SPE_NUM] = { 0 };
+
+    int b_src = 1;
+    // 初始化源数据数组
+    for (int i = 0; i < SIZE; i++) {
+        h_src[i] = b_src++;
+    }
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    int *d_src = NULL;
+    int *d_errnum = NULL;
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&d_src), SIZE * sizeof(int));
+    sdaaMalloc((void **)(&d_errnum), SPE_NUM * sizeof(int));
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(d_src, h_src, SIZE * sizeof(int), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(d_errnum, h_errnum, SPE_NUM * sizeof(int),
+               sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    func<<<1>>>(d_src, d_errnum);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(h_errnum, d_errnum, SPE_NUM * sizeof(int),
+               sdaaMemcpyDeviceToHost);
+
+    // 统计广播失败的数量
+    for (int i = 0; i < SPE_NUM; i++) {
+        errnum += h_errnum[i];
+    }
+
+    printf("errnum = %d\n", errnum);
+
+    // 释放Device端内存
+    sdaaFree(d_errnum);
+    sdaaFree(d_src);
+    return 0;
+}

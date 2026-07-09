@@ -1,0 +1,99 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端。
+// 2. 在设备端, 对16位浮点数据向量按元素拼接。根据n的低6位（忽略其低1位）确定拼接字节位置，将va的低段数据和vb的高段数据拼接后形成新的向量。
+// 3. 在Host端对结果进行打印。
+
+#define NUM 16
+
+__global__ void test(half *f16_1, half *f16_2, long n1) {
+    // 使用0号计算核心进行运算
+    if (threadIdx == 0) {
+        halfv16 __A, __B;
+        simd_loadu(__A, f16_1);
+        simd_loadu(__B, f16_2);
+        __A = simd_concat(__A, __B, (void *)n1);
+        simd_store(__A, f16_1);
+    }
+}
+
+int main() {
+    // 分配Host端地址
+    half *f16_1 = (half *)malloc(NUM * sizeof(half));
+    half *f16_2 = (half *)malloc(NUM * sizeof(half));
+    half *refer = (half *)malloc(NUM * sizeof(half));
+    //  设置拼接位置
+    long num = 9;
+    // 为分配的Host地址进行初始化
+    for (int i = 0; i < NUM; i++) {
+        f16_1[i] = 10.5 + i;
+        f16_2[i] = 20.5 + i;
+    }
+    for (unsigned long i = num; i < NUM; i++) {
+        refer[i - num] = f16_1[i];
+    }
+    for (unsigned long i = 0; i < num; i++) {
+        refer[i + NUM - num] = f16_2[i];
+    }
+    //  声明Device端地址
+    half *d_1 = NULL;
+    half *d_2 = NULL;
+    //  配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+    //  使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&d_1), NUM * sizeof(half));
+    //  使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(d_1, f16_1, NUM * sizeof(half), sdaaMemcpyHostToDevice);
+    sdaaMalloc((void **)(&d_2), NUM * sizeof(half));
+    sdaaMemcpy(d_2, f16_2, NUM * sizeof(half), sdaaMemcpyHostToDevice);
+    //  启动核函数调用
+    test<<<1>>>(d_1, d_2, num << 2);
+    //  等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+    //  使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(f16_1, d_1, NUM * sizeof(half), sdaaMemcpyDeviceToHost);
+
+    // 打印计算结果
+    for (int i = 0; i < NUM; i++) {
+        printf("real[%d] %f, f16_1[%d] %f\n", i, (double)f16_1[i], i, (double)refer[i]);
+    }
+
+    //  释放Device端内存
+    sdaaFree(d_1);
+    sdaaFree(d_2);
+    //  释放host端内存
+    free(f16_1);
+    free(f16_2);
+    free(refer);
+
+    return 0;
+}

@@ -92,9 +92,6 @@ pip install torch torch-sdaa
 # 构建并安装（本地开发模式）
 WITH_TORCH=ON python setup.py build_ext --inplace
 
-# 或使用 --with-torch 参数
-python setup.py build_ext --inplace --with-torch
-
 # 构建wheel包
 WITH_TORCH=ON python setup.py bdist_wheel
 ```

@@ -1,0 +1,198 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 对half类型的矩阵进行矩阵乘计算。并将计算结果传回Host，与Host模拟的矩阵乘结果进行对比。
+// 2. 使用check_matmul对输入矩阵和权重矩阵进行合法性校验。并将校验结果传回Host。
+
+#include <sdaa_runtime.h>
+#include <stdio.h>
+#include <time.h>
+#include <simd.h>
+#include <sdaa_matmul.h>
+using namespace sdaa;
+
+#define M 200    // 输入矩阵行数
+#define N 100    // 输入矩阵最大列数，权重矩阵最大行数
+#define K 100    // 权重矩阵最大列数
+
+__global__ void test(char* dataA, char* dataB, char* dataC,
+                     unsigned int* check_val, int dev_m,
+                     int dev_k, int dev_n) {
+    // 只有0号计算核心SPE进行矩阵乘操作
+    if (threadIdx != 0) {
+      return;
+    }
+
+    // 进行矩阵运算前，使用check_matmul对输入参数进行合法性校验
+    check_val[1] = check_matmul(MatmulHalfToHalf, dataC, dataA, dataB,
+                                    dev_m, dev_k, dev_n);
+
+    // 进行矩阵乘操作
+    matmul(MatmulHalfToHalf, dataC, dataA, dataB, dev_m, dev_k, dev_n);
+}
+
+int main() {
+    int i, j, k;
+
+    // 声明Device端地址
+    // dev_a为输入矩阵，dev_b为权重矩阵，dev_c为计算结果矩阵
+    char* dev_a = NULL;
+    char* dev_b = NULL;
+    char* dev_c = NULL;
+
+    srand(time(NULL));
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void**)&dev_a, M * K * sizeof(half));
+    sdaaMalloc((void**)&dev_b, K * N * sizeof(half));
+    sdaaMalloc((void**)&dev_c, M * N * sizeof(half));
+
+    // 分配Host端地址
+    // host_a为输入矩阵，host_b为权重矩阵，host_c为计算结果矩阵
+    // host_c_s为Host模仿矩阵乘计算，计算结果存储矩阵
+    half* host_a = (half*)malloc(M * K * sizeof(half));
+    half* host_b = (half*)malloc(K * N * sizeof(half));
+    half* host_c = (half*)malloc(M * N * sizeof(half));
+    half* host_c_s = (half*)malloc(M * N * sizeof(half));
+
+    // 为Host端输入矩阵进行初始化
+    memset(host_a, 0, M * K * sizeof(half));
+    for (i = 0; i < M; i++) {
+      for (j = 0; j < K; j++) {
+        host_a[i * K + j] = 1.0 * rand() / RAND_MAX * 10.0 - 5;
+      }
+    }
+
+    // 为Host端输入权重进行初始化
+    memset(host_b, 0, K * N * sizeof(half));
+    for (i = 0; i < K; i++) {
+        for (j = 0; j < N; j++) {
+            host_b[i * N + j] = 1.0 * rand() / RAND_MAX * 0.1 - 0.05;
+        }
+    }
+
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(dev_a, host_a, M * K * sizeof(half), sdaaMemcpyHostToDevice);
+    sdaaMemcpy(dev_b, host_b, K * N * sizeof(half), sdaaMemcpyHostToDevice);
+
+    // 声明Device端dev_check_val
+    unsigned int* dev_check_val = NULL;
+
+    // 使用sdaaMalloc为dev_check_val进行空间分配
+    sdaaMalloc((void**)&dev_check_val, 1 * sizeof(unsigned int));
+
+    // 为Host端check_val进行空间分配
+    unsigned int* check_val = (unsigned int*)malloc(1 * sizeof(unsigned int));
+
+    // 循环调用矩阵乘接口，计算如下三组数据量的矩阵
+    // 1. 输入矩阵行列为200 * 32，权重矩阵行列为 32 * 32
+    // 2. 输入矩阵行列为200 * 64，权重矩阵行列为 64 * 64
+    // 3. 输入矩阵行列为200 * 100，权重矩阵行列为 100 * 100
+    for (int test_input = 1; test_input <= 3; test_input++) {
+        // 构造输入矩阵和权重矩阵的列数
+        const int test_k = (test_input == 3) ? K : (test_input * 32);
+        const int test_n = (test_input == 3) ? N : (test_input * 32);
+
+        // 打印矩M，K 和 N
+        printf("testcase: %d * %d * %d\n", M, test_k, test_n);
+
+        // 启动核函数调用
+        test<<<1>>>(dev_a, dev_b, dev_c, dev_check_val, M, test_k,
+                    test_n);
+
+        // 等待计算核心SPE完成之前的所有请求任务
+        sdaaDeviceSynchronize();
+
+        // 使用sdaaMemcpy将Device端矩阵乘计算结果拷贝到Host端
+        sdaaMemcpy(host_c, dev_c, M * test_n * sizeof(half),
+                   sdaaMemcpyDeviceToHost);
+
+        // 初始化host_c_s
+        memset(host_c_s, 0, M * test_n * sizeof(half));
+
+        // 在Host模拟矩阵乘操作，并将结果存放到host_c_s
+        for (i = 0; i < M; i++) {
+            for (j = 0; j < test_n; j++) {
+                for (k = 0; k < test_k; k++) {
+                    host_c_s[i * test_n + j] +=
+                        host_a[i * test_k + k] * host_b[k * test_n + j];
+                }
+            }
+        }
+
+        // 将Device端矩阵乘计算结果与Host端计算结果进行对比，验证失败则打印对应日志
+        for (i = 0; i < M * test_n; i++) {
+            if (host_c[i] - host_c_s[i] > 1e-1) {
+                printf("find mismatching data on line %d: ace: %f, "
+                       "serial: %f\n", i, (float)host_c[i], (float)host_c_s[i]);
+                break;
+            }
+
+            // 如果验证成功，则打印对应日志
+            if (i == M * test_n - 1) {
+                printf("matmul result compare ok\n");
+            }
+        }
+
+        // 使用sdaaMemcpy将Device端验证输入参数合法性结果拷贝到Host端
+        sdaaMemcpy(check_val, dev_check_val, 1 * sizeof(unsigned int),
+                   sdaaMemcpyDeviceToHost);
+
+        // 对check结果进行合法性校验，验证失败则打印验证失败日志，否则打印验证成功日志
+        // 结果为0，表示输入参数合法
+        if (check_val[0] == 0) {
+            printf("all input errors checked\n");
+        } else {
+            printf("check_matmul returns %d\n", *check_val);
+        }
+
+        if (test_input != 3) {
+            printf("\n");
+        }
+    }
+
+
+    // 释放在Device端和Host申请的内存
+    free(check_val);
+    sdaaFree(dev_check_val);
+    free(host_c_s);
+    free(host_c);
+    free(host_b);
+    free(host_a);
+    sdaaFree(dev_c);
+    sdaaFree(dev_b);
+    sdaaFree(dev_a);
+
+    return 0;
+}

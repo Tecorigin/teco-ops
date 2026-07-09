@@ -1,0 +1,206 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. Device端使用memcpy进行SPM到SPM的内存拷贝。
+// 2. 再使用memcpy进行SPM到Global的内存拷贝。
+// 3. 将拷贝结果发回Host并进行打印输出。
+
+#include <stdio.h>
+#include <stdlib.h>
+using namespace sdaa;
+
+#define NUM 3
+#define MALLOC_SIZE (30*16*64)
+#define LITTLE_SIZE (5*64)
+#define MIDDLE_SIZE (20*64+23)
+#define LARGE_SIZE (20*16*64+63)
+#define CHAR_MIN (-128)
+#define CHAR_MAX (127)
+
+__device__ void test_memcpy(unsigned int *slavecheck, char *slavearr1,
+                            char *slavearr2, char *slavearr3) {
+    int i;
+
+    // 在SPM空间内分配内存，并使用memset进行初始化操作
+    char *ta = (char *)malloc(MALLOC_SIZE);
+    memset(ta, 0, MALLOC_SIZE);
+
+    char *tb = (char *)malloc(MALLOC_SIZE);
+    memset(tb, 0 ,MALLOC_SIZE);
+
+    char *tc = (char *)malloc(MALLOC_SIZE);
+    memset(tc, 0 ,MALLOC_SIZE);
+
+    // 在SPM空间内分配内存，并使用memset进行初始化操作
+    // str为源数据地址
+    char *str = (char *)malloc(MALLOC_SIZE);
+    memset(str, 0 ,MALLOC_SIZE);
+
+    // 初始化源数据
+    char tmp = CHAR_MIN;
+    for (i = 0; i < MALLOC_SIZE; i++) {
+        str[i] = tmp;
+        tmp++;
+        if (tmp > CHAR_MAX) {
+            tmp = CHAR_MIN;
+        }
+    }
+
+    // 对目的地址，源地址以及拷贝数据量进行合法性校验
+    slavecheck[0] = check_memcpy(ta, str, LITTLE_SIZE);
+    slavecheck[1] = check_memcpy(tb, str, MIDDLE_SIZE);
+    slavecheck[2] = check_memcpy(tc, str, LARGE_SIZE);
+
+    // 如果参数合法，进行数据拷贝。先将SPM数据拷贝到SPM上的临时数组
+    // 再从SPM内存拷贝到Global内存
+    if (!(slavecheck[0] & 0x1)) {
+        memcpy(ta, str, LITTLE_SIZE);
+        memcpy(slavearr1, ta, LITTLE_SIZE);
+    }
+
+    if (!(slavecheck[1] & 0x1)) {
+        memcpy(tb, str, MIDDLE_SIZE);
+        memcpy(slavearr2, tb, MIDDLE_SIZE);
+    }
+
+    if (!(slavecheck[2] & 0x1)) {
+        memcpy(tc, str, LARGE_SIZE);
+        memcpy(slavearr3, tc, LARGE_SIZE);
+    }
+
+    // 释放再SPM上申请的空间
+    free(ta);
+    free(tb);
+    free(tc);
+    free(str);
+}
+
+__global__ void call_memcpy(unsigned int *slavecheck, char *slavearr1,
+                            char *slavearr2, char *slavearr3) {
+      // 仅使用0号计算核心进行功能测试
+    if(threadIdx == 0) {
+        test_memcpy(slavecheck, slavearr1, slavearr2, slavearr3);
+      }
+}
+
+static void call_sdaa(unsigned int *realcheck, char *realarr1,
+                      char *realarr2, char *realarr3) {
+    // 声明Device端地址
+    unsigned int  *slavecheck = NULL;
+    char *slavearr1 = NULL;
+    char *slavearr2 = NULL;
+    char *slavearr3 = NULL;
+
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&slavecheck), NUM * sizeof(unsigned int));
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(slavecheck, realcheck,
+               NUM * sizeof(unsigned int), sdaaMemcpyHostToDevice);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&slavearr1), MALLOC_SIZE);
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(slavearr1, realarr1, MALLOC_SIZE, sdaaMemcpyHostToDevice);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&slavearr2), MALLOC_SIZE);
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(slavearr2, realarr2, MALLOC_SIZE, sdaaMemcpyHostToDevice);
+
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void **)(&slavearr3), MALLOC_SIZE);
+    // 使用sdaaMemcpy将Host端内存拷贝到Device端
+    sdaaMemcpy(slavearr3, realarr3, MALLOC_SIZE, sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    call_memcpy<<<4>>>(slavecheck, slavearr1, slavearr2, slavearr3);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端数据拷贝到Host端
+    sdaaMemcpy(realcheck, slavecheck, NUM * sizeof(unsigned int),
+               sdaaMemcpyDeviceToHost);
+    sdaaMemcpy(realarr1, slavearr1, MALLOC_SIZE, sdaaMemcpyDeviceToHost);
+    sdaaMemcpy(realarr2, slavearr2, MALLOC_SIZE, sdaaMemcpyDeviceToHost);
+    sdaaMemcpy(realarr3, slavearr3, MALLOC_SIZE, sdaaMemcpyDeviceToHost);
+
+    // 释放Device端内存
+    sdaaFree(slavecheck);
+    sdaaFree(slavearr1);
+    sdaaFree(slavearr2);
+    sdaaFree(slavearr3);
+}
+
+int main() {
+    // realcheck用于存储合法性校验结果
+    unsigned int realcheck[NUM];
+
+    // realarr1、realarr2、realarr3用于存储在Device端拷贝的结果
+    char realarr1[MALLOC_SIZE];
+    char realarr2[MALLOC_SIZE];
+    char realarr3[MALLOC_SIZE];
+
+    // 初始化Host端内存数据
+    memset(realarr1, 0 ,MALLOC_SIZE);
+    memset(realarr2, 0 ,MALLOC_SIZE);
+    memset(realarr3, 0 ,MALLOC_SIZE);
+
+    call_sdaa(realcheck, realarr1, realarr2, realarr3);
+
+    // 打印结果
+    printf("realarr1 data: \n");
+    for (int i = 0; i < LITTLE_SIZE; i++) {
+        printf("%d\t", realarr1[i]);
+    }
+
+    printf("\nrealarr2 data: \n");
+    for (int i = 0; i < LITTLE_SIZE; i++) {
+        printf("%d\t", realarr2[i]);
+    }
+
+    printf("\nrealarr3 data: \n");
+    for (int i = 0; i < LITTLE_SIZE; i++) {
+        printf("%d\t", realarr3[i]);
+    }
+
+    // 打印合法性校验结果
+    printf("\ncheck result: \n");
+    for (int i = 0; i < NUM; i++) {
+        printf("%d\t", realcheck[i]);
+    }
+    printf("\n");
+    return 0;
+}
+

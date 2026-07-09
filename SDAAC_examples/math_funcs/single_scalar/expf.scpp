@@ -1,0 +1,104 @@
+// Copyright (c) 2023 Tecorigin Co., Ltd. All rights reserved.
+
+// *NOTICE TO LICENSE:
+// *This source code and/or documentation ("Licensed Deliverables") are subject
+// to TECORIGIN intellectual property rights under CHINA and
+// international Copyright laws.
+
+// These Licensed Deliverables contained herein is PROPRIETARY and CONFIDENTIAL
+// to TECORIGIN and is being provided under the terms and conditions of a
+// form of TECORIGIN software license agreement by and between TECORIGIN and
+// Licensee ("License Agreement") or electronically accepted by Licensee.
+
+// Notwithstanding any terms or conditions to the contrary in the License
+// Agreement, reproduction or disclosure of the Licensed Deliverables to any
+// third party without the express written consent of TECORIGIN is prohibited.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, TECORIGIN MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THESE
+// LICENSED DELIVERABLES FOR ANY PURPOSE.  IT IS PROVIDED "AS IS" WITHOUT
+// EXPRESS OR IMPLIED WARRANTY OF ANY KIND. TECORIGIN DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THESE LICENSED DELIVERABLES, INCLUDING ALL IMPLIED WARRANTIES
+// OF MERCHANTABILITY,NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+
+// *NOTWITHSTANDING ANY TERMS OR CONDITIONS TO THE CONTRARY IN THE LICENSE
+// AGREEMENT, IN NO EVENT SHALL TECORIGIN BE LIABLE FOR ANY SPECIAL, INDIRECT,
+// INCIDENTAL, OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+// FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+// NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH
+// THE USE OR PERFORMANCE OF THESE LICENSED DELIVERABLES.
+
+// 场景介绍：
+// 1. 在Host端构造原始数据，并将数据通过参数传递到Device端
+// 2. 在Device端对原始数据计算e^x取值，并将计算结果传回Host端
+// 3. 在Host对计算结果进行输出
+#include <ctime>
+
+#define NUM 100
+
+#define MAX_VAL 100
+
+typedef float ftype;
+
+__global__ void tecomath(ftype *data) {
+    // 使用0号计算核心进行数据处理
+    if (threadIdx != 0) {
+        return;
+    }
+
+    // 计算e^x取值
+    for (unsigned long i = 0; i < NUM; i++) {
+        data[i] = expf(data[i]);
+    }
+}
+
+void testsdaa(ftype *data) {
+    // 配置使用0号计算核心阵列
+    sdaaSetDevice(0);
+
+    // 声明Device端地址
+    ftype* dev_data = NULL;
+    // 使用sdaaMalloc为Device端地址进行空间分配
+    sdaaMalloc((void**)(&dev_data), NUM * sizeof(ftype));
+    // 使用sdaaMemcpy将Host端内存数据拷贝到Device端
+    sdaaMemcpy(dev_data, data, NUM * sizeof(ftype),
+               sdaaMemcpyHostToDevice);
+
+    // 启动核函数调用
+    tecomath<<<1>>>(dev_data);
+
+    // 等待计算核心SPE完成之前的所有请求任务
+    sdaaDeviceSynchronize();
+
+    // 使用sdaaMemcpy将Device端计算结果拷贝到Host端
+    sdaaMemcpy(data, dev_data, NUM * sizeof(ftype), sdaaMemcpyDeviceToHost);
+
+    // 释放在Device端申请的内存
+    sdaaFree(dev_data);
+}
+
+int main() {
+    // 在Host端申请内存
+    // data存储数据源以及通过Device端expf进行计算的结果，oridata存储数据源
+    ftype *data = (ftype *)malloc(NUM * sizeof(ftype));
+    ftype *oridata = (ftype *)malloc(NUM * sizeof(ftype));
+
+    // 初始化数据源
+    srand(time(NULL));
+    for (unsigned int i = 0; i < NUM; i++) {
+        data[i] = (rand() / ((ftype)RAND_MAX) - 0.5) * 2.0 * MAX_VAL;
+        oridata[i] = data[i];
+    }
+
+    testsdaa(data);
+
+    // 循环打印计算结果和源数据
+    for (int i = 0; i < NUM; i++) {
+        printf("data[%d] = %e, oridata[%d] = %e\n", i, data[i], i, oridata[i]);
+    }
+
+    // 释放在Host端申请的内存
+    free(oridata);
+    free(data);
+    return 0;
+}

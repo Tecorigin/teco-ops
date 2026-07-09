@@ -1,0 +1,214 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+
+#include <time.h>
+#include <sdaa_matmul.h>
+#include "../common.h"
+
+using namespace sdaa;
+
+// B 数据batch大小
+#define B 32
+// M维度大小
+#define M 128
+// N维度大小
+#define N 32
+// K维度大小
+#define K 256
+// K维度切分的最小颗粒度
+#define K_BLK 32
+
+// 矩阵乘的核函数，参数是输入矩阵a，b和输出矩阵c的地址
+__global__ void kernel_matmul(char *dataA, char *dataB, char *dataC) {
+    // 计算每个SPE 要平均分配多少batch的数据量
+    int32_t batch_spe = B/threadDim;
+    // 一个SPE分别被分得的 矩阵a, b, c的batch数的总数据量大小
+    int32_t a_size_spe = batch_spe * M * K * sizeof(int16_t);
+    int32_t b_size_spe = batch_spe * K * N * sizeof(int16_t);
+    int32_t c_size_spe = batch_spe * M * N * sizeof(int32_t);
+    // 给输入矩阵a（输入矩阵）申请SPM存储空间
+    int16_t *spm_input = (int16_t *)malloc(a_size_spe);
+    // 通过threadIdx做地址偏移，将当前spe分得的输入矩阵a的数据从Global内存上复制到
+    // SPM上申请的a矩阵数据空间
+    memcpy_async(spm_input, dataA + threadIdx * a_size_spe, a_size_spe, MemcpyGlobalToSpm);
+
+    // 给输入矩阵b（权重矩阵）申请SPM存储空间
+    int16_t *spm_weight = (int16_t *)malloc(b_size_spe);
+    // 通过threadIdx做地址偏移，将当前spe分得的输入矩阵b的数据从Global内存上复制到
+    // SPM上申请的b矩阵数据空间
+    memcpy_async(spm_weight, dataB + threadIdx * b_size_spe, b_size_spe, MemcpyGlobalToSpm);
+    // 等待矩阵a，b数据复制完成
+    memcpy_wait();
+    // 给输出矩阵c 申请SPM存储空间
+    int32_t *spm_output = (int32_t *)malloc(c_size_spe);
+
+    // 定义一个矩阵乘的句柄，可以将矩阵乘的一些配置项设置到句柄里。这样矩阵乘执行时，
+    // 可以按照句柄里的配置来进行计算
+    MatmulHandle handle;
+    // 配置输入数据是short 类型，输出数据是int型
+    matmul_init(handle, MatmulShortToInt);
+    // 计算一次矩阵乘 K 的切分是32一块，一个循环计算2次。计算出循环次数
+    uint32_t chunks = K / (K_BLK * 2);
+
+    for (int j = 0; j < chunks; j++) {
+        // 等待输入矩阵a矩阵数据加载完成，若之前没有加载动作，等待也会自动跳过
+        matmul_wait_loading_input(handle);
+        // 等待权重矩阵b矩阵数据加载完成，若之前没有加载动作，等待也会自动跳过
+        matmul_wait_loading_weight(handle);
+        // 设置本次matmul计算完成后，是否需要把数据从累加buffer 刷出到SPM上
+        // 本次计算不是最后一次，所以不需要设置刷出数据
+        matmul_set_flushing_output(handle, false);
+        // 设置输入矩阵a的偏移量，通常是输入矩阵行数不够128，且没有从128行的第一行
+        // 开始加载时，才需要设置的偏移量。此处输入是128行，且从128行里的第一行开始
+        // 所以设置为0
+        matmul_set_output_row_offset(handle, MatmulEnableOutputRowOffset, 0);
+        // 加载权重矩阵b，由之前计算出循环的第一次地址是 pBase_b  + ((2 * j ) * 32 × 32 + 0)，
+        // 对应到代码中是，spm_weight + K_BLK * K_BLK * j * 2
+        matmul_load_weight(handle, spm_weight + K_BLK * K_BLK * j * 2, MatmulK32, MatmulN32);
+        // 加载输入矩阵并进行计算，由之前计算出第一次地址是 pBase_a  + (2 * j) * 32，
+        // 对应到代码中是，spm_input + K_BLK * j * 2，注意跨步的基本单位是 64B，
+        // 跨步的步长是7(即 K / K_BLK - 1)
+        matmul_compute(handle, spm_input + K_BLK * j * 2, M, MatmulK32, (K / K_BLK - 1));
+
+        // 设置本次matmul计算完成后，是否需要把数据从累加buffer 刷出到SPM上。
+        // 当j == (chunks - 1)， 即最后一次计算后，需要把数据刷出到SPM上
+        matmul_set_flushing_output(handle, (j == (chunks - 1)));
+        // 设置输入矩阵a的偏移量，通常是输入矩阵行数不够128，且没有从128行的第一行
+        // 开始加载时，才需要设置的偏移量。此处输入是128行，且从128行里的第一行开始
+        // 所以设置为0
+        matmul_set_output_row_offset(handle, MatmulEnableOutputRowOffset, 0);
+        // 加载权重矩阵b，由之前计算出循环的第一次地址是 pBase_b  + ((2 * j + 1) * 32 × 32 + 0)，
+        // 对应到代码中是，spm_weight + K_BLK * K_BLK * (j * 2 + 1)
+        matmul_load_weight(handle, spm_weight + K_BLK * K_BLK * (j * 2 + 1),
+                           MatmulK32, MatmulN32);
+        // 加载输入矩阵并进行计算，由之前计算出第一次地址是 pBase_a  + (2 * j + 1) * 32，
+        // 对应到代码中是，spm_input + K_BLK * (j * 2 + 1)，注意跨步的基本单位是 64B，
+        // 跨步的步长是7(即 K / K_BLK - 1)
+        matmul_compute(handle, spm_input + K_BLK * (j * 2 + 1), M, MatmulK32,
+                       (K / K_BLK - 1));
+    }
+    // 把累加buffer 上的数据，输出到已申请的SPM地址 spm_output上
+    matmul_store(handle, spm_output, M, MatmulN32);
+    // 等待数据刷出完成
+    matmul_wait(handle);
+    // 通过threadIdx做地址偏移，将当前spe计算出的输出矩阵c的数据复制到Global上
+    memcpy(dataC + threadIdx * c_size_spe, spm_output, c_size_spe);
+    // 释放申请的SPM存储空间
+    free(spm_output);
+    free(spm_weight);
+    free(spm_input);
+}
+
+int main() {
+    int b, i, j, k;
+    int errnum = 0;
+    char *dev_a = NULL;
+    char *dev_b = NULL;
+    char *dev_c = NULL;
+
+    int a_size = B * M * K;
+    int b_size = B * K * N;
+    int c_size = B * M * N;
+
+    unsigned int local_seed = time(NULL);
+
+    // 设置需要用到的设备号
+    sdaaSetDevice(1);
+    // 在Device端申请输入矩阵a 的Global空间
+    sdaaMalloc((void **)&dev_a, a_size * sizeof(int16_t));
+    // 在Device端申请输入矩阵b 的Global空间
+    sdaaMalloc((void **)&dev_b, b_size * sizeof(int16_t));
+    // 在Device端申请输出矩阵c 的Global空间
+    sdaaMalloc((void **)&dev_c, c_size * sizeof(int));
+    // 在Host 端申请输入矩阵a的内存空间
+    int16_t *host_a = (int16_t *)malloc(a_size * sizeof(int16_t));
+    // 在Host 端申请输入矩阵b的内存空间
+    int16_t *host_b = (int16_t *)malloc(b_size * sizeof(int16_t));
+    // 在Host 端申请需要从设备端复制数据到Host端输出矩阵c的内存空间
+    int *host_c = (int *)malloc(c_size * sizeof(int));
+    // 在Host 端申请Host 自己计算的输出矩阵c 的对比数据的内存空间
+    int *true_c = (int *)malloc(c_size * sizeof(int));
+    // 初始化矩阵a, b的输入数据
+    memset(host_a, 0, a_size * sizeof(int16_t));
+    memset(host_b, 0, b_size * sizeof(int16_t));
+    for (b = 0; b < B; b++) {
+        for (i = 0; i < M; i++) {
+            for (j = 0; j < K; j++) {
+                host_a[b * M * K + i * K + j] = rand_r(&local_seed) % 100 - 50;
+            }
+        }
+        for (i = 0; i < K; i++) {
+            for (j = 0; j < N; j++) {
+                host_b[b * K * N + i * N + j] = rand_r(&local_seed) % 5 - 2;
+            }
+        }
+    }
+
+    // 将初始化好的输入矩阵a数据从Host 端复制到Device 端
+    sdaaMemcpy(dev_a, host_a, a_size * sizeof(int16_t), sdaaMemcpyHostToDevice);
+    // 将初始化好的输入矩阵b数据从Host 端复制到Device 端
+    sdaaMemcpy(dev_b, host_b, b_size * sizeof(int16_t), sdaaMemcpyHostToDevice);
+
+    // Kernel函数kernel_matmul运行
+    kernel_matmul<<<1>>>(dev_a, dev_b, dev_c);
+    sdaaDeviceSynchronize();
+    // 将Device 端计算好的 输出矩阵c的数据复制到Host 端
+    sdaaMemcpy(host_c, dev_c, c_size * sizeof(int), sdaaMemcpyDeviceToHost);
+
+    memset(true_c, 0, c_size * sizeof(int));
+    // Host端计算 用于对比的输出矩阵c的数据
+    for (b = 0; b < B; b++) {
+        for (i = 0; i < M; i++) {
+            for (j = 0; j < N; j++) {
+                for (k = 0; k < K; k++) {
+                    true_c[b * M * N + i * N + j] +=
+                        ((int)host_a[b * M * K + i * K + k])
+                         * ((int)host_b[b * K * N + k * N + j]);
+                }
+            }
+        }
+    }
+
+    // 调用teco 提供的精度验证接口，第1个参数是搬运到Host 端的 Device计算出来的
+    // 数据的地址。 第2个是CPU 计算出的数据的地址。第3个参数是数据类型。
+    // 第4个参数是数据总数。
+    tecoAccuracyValidate(host_c, true_c, TECOACCURACY_DATA_INT32, c_size);
+
+    // 释放Host端内存空间
+    free(true_c);
+    free(host_c);
+    free(host_b);
+    free(host_a);
+    // 释放Device端内存空间
+    sdaaFree(dev_c);
+    sdaaFree(dev_b);
+    sdaaFree(dev_a);
+
+    // 最后调用common提供的 CHECK 宏，以检查精度是否出错。
+    CHECK();
+    return 0;
+}
