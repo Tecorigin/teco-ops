@@ -96,9 +96,76 @@ void rms_norm_torch(
                    num_tokens, hidden_size, static_cast<float>(eps));
 }
 
+void flash_attn_varlen_func_torch(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    int max_seqlen_q,
+    torch::Tensor cu_seqlens_q,
+    int max_seqlen_k,
+    torch::Tensor cu_seqlens_k,
+    torch::Tensor seqused_k,
+    double softmax_scale,
+    bool causal,
+    torch::Tensor window_size,
+    torch::Tensor block_table,
+    bool return_softmax_lse,
+    torch::Tensor out) {
+
+    int batch_size = q.size(0);
+    int max_block_num = k.size(0);
+
+    // parse q_seq_lens
+    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
+    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
+    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
+    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
+    for (int b = 0; b < batch_size; b++) {
+        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
+    }
+    auto q_lens = q_lens_cpu.to("sdaa");
+
+    if (!out.defined()) {
+        out = torch::empty_like(q);
+    }
+
+    tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsTensorDescriptor_t blockTableDesc, qDataDesc, kCacheDesc, vCacheDesc, oDataDesc;
+    auto make_desc = [&](tecoopsTensorDescriptor_t &desc, tecoopsDataType_t dtype,
+                         torch::Tensor &t) {
+        tecoopsCreateTensorDescriptor(&desc);
+        int ndim = t.dim();
+        std::vector<int> dims(ndim);
+        for (int i = 0; i < ndim; i++) dims[i] = t.size(i);
+        tecoopsSetTensorNdDescriptor(desc, dtype, ndim, dims.data(), nullptr);
+    };
+    make_desc(blockTableDesc, TECOOPS_DATA_INT32, block_table);
+    make_desc(qDataDesc, TECOOPS_DATA_HALF, q);
+    make_desc(kCacheDesc, TECOOPS_DATA_HALF, k);
+    make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
+    make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
+
+    tecoopsFlashAttention(handle,
+                          max_seqlen_q, max_seqlen_k, max_block_num,
+                          (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
+                          blockTableDesc, block_table.data_ptr(),
+                          qDataDesc, q.data_ptr(),
+                          kCacheDesc, k.data_ptr(),
+                          vCacheDesc, v.data_ptr(),
+                          oDataDesc, out.data_ptr(),
+                          /*workspace=*/nullptr);
+
+    tecoopsDestroyTensorDescriptor(blockTableDesc);
+    tecoopsDestroyTensorDescriptor(qDataDesc);
+    tecoopsDestroyTensorDescriptor(kCacheDesc);
+    tecoopsDestroyTensorDescriptor(vCacheDesc);
+    tecoopsDestroyTensorDescriptor(oDataDesc);
+}
+
 PYBIND11_MODULE(_torch_ext, m) {
     m.def("flatten_rays", &flatten_rays_torch, "flatten_rays (SDAA)");
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
     m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
+    m.def("flash_attn_varlen_func", &flash_attn_varlen_func_torch, "flash_attn_varlen_func (SDAA)");
 }

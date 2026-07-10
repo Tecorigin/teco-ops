@@ -354,7 +354,7 @@ bool resetNanOrInfAsZero(T *teco_result, T *gpu_result, T *baseline_result, size
 }
 
 template <typename T>
-bool resetNanOrInfAsZero(T *baseline, T *device, size_t count, Error *error_teco) {
+bool resetNanOrInfAsZero(T *device, T *baseline, size_t count, Error *error_teco) {
     auto check = [&](size_t start, size_t end, bool &is_failed, bool &has_nan, bool &has_inf) {
         has_nan = false;
         has_inf = false;
@@ -461,7 +461,7 @@ class Evaluator {
         auto func = criterion.formula;
         if (!Context::instance()->compareWithGPU()) {
             // if both device and baseline is nan/inf, set them zero
-            if (!resetNanOrInfAsZero(baseline, device_result, count, &error)) {
+            if (!resetNanOrInfAsZero(device_result, baseline, count, &error)) {
                 error.has_nan = true;
                 return error;
             }

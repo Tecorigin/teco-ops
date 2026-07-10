@@ -152,6 +152,21 @@ tecoopsStatus_t tecoopsRmsNorm(
     int hidden_size,
     float eps);
 
+tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
+                                      int max_seqlen_q, int max_seqlen_k,
+                                      int max_block_num, const int *q_seq_lens,
+                                      const int *kv_seq_lens, 
+                                      const tecoopsTensorDescriptor_t blockTableDesc,
+                                      const void *blockTable,
+                                      const tecoopsTensorDescriptor_t qDataDesc,
+                                      const void *qData,
+                                      const tecoopsTensorDescriptor_t kCacheDesc,
+                                      const void *kCache,
+                                      const tecoopsTensorDescriptor_t vCacheDesc,
+                                      const void *vCache,
+                                      const tecoopsTensorDescriptor_t oDataDesc,
+                                      void *oData, void *workspace);
+
 #ifdef __cplusplus
 }
 #endif

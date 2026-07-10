@@ -7,10 +7,12 @@ import "tecokernel/memset.proto";
 import "tecokernel/reduce_variance.proto";
 import "tecokernel/reshape_and_cache.proto";
 import "tecokernel/rms_norm.proto";
+import "tecokernel/flash_attention.proto";
 
 message TecokernelParam {
     optional MemsetParam memset_param                            = 1;
     optional ReduceVarianceParam reduce_variance_param           = 2;
     optional ReshapeAndCacheParam reshape_and_cache_param        = 3;
     optional RmsNormParam rms_norm_param                         = 4;
+    optional FlashAttentionParam flash_attention_param           = 5;
 }
