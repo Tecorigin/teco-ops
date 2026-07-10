@@ -1,7 +1,15 @@
 import os
+import glob
 import subprocess
 import shutil
 from setuptools import setup, Extension
+
+current_path = os.path.abspath(os.path.dirname(__file__))
+
+# Clean up old .so files before building
+for so_file in glob.glob(os.path.join(current_path, "api", "tecoops", "*.so")):
+    os.remove(so_file)
+    print(f"Removed {so_file}")
 
 def get_version():
     try:
@@ -23,7 +31,6 @@ try:
 except ImportError:
     from distutils.command.clean import clean
 
-current_path = os.path.abspath(os.path.dirname(__file__))
 teco_source_dir = os.path.join(current_path, "teco")
 teco_build_dir = os.path.join(current_path, "build", "teco")
 teco_lib_dir = os.path.join(teco_build_dir, "lib")
