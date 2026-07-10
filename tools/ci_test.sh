@@ -67,6 +67,7 @@ done
 FAILED_STEP="运行 plugin api 测试"
 echo "======================================================"
 echo "run plugin api tests"
+export LD_LIBRARY_PATH=$(python -c "import tvm; import os; print(os.path.dirname(tvm.__file__))" | tail -n 1):${LD_LIBRARY_PATH}
 export LD_LIBRARY_PATH=$(realpath ../api/tecoops):${LD_LIBRARY_PATH}
 cd ../plugin_test
 IFS=';' read -ra OPS_ARRAY <<< "$ops"
