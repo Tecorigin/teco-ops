@@ -8,6 +8,7 @@ import "tecokernel/reduce_variance.proto";
 import "tecokernel/reshape_and_cache.proto";
 import "tecokernel/rms_norm.proto";
 import "tecokernel/flash_attention.proto";
+import "tecokernel/causal_conv1d.proto";
 
 message TecokernelParam {
     optional MemsetParam memset_param                            = 1;
@@ -15,4 +16,5 @@ message TecokernelParam {
     optional ReshapeAndCacheParam reshape_and_cache_param        = 3;
     optional RmsNormParam rms_norm_param                         = 4;
     optional FlashAttentionParam flash_attention_param           = 5;
+    optional CausalConv1dParam causal_conv1d_param               = 6;
 }

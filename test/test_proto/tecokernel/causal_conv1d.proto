@@ -1,0 +1,11 @@
+syntax = "proto2";
+package testpt;
+
+message CausalConv1dParam{
+    optional int32 pad_slot_id       = 1 [default = -1];
+    optional int32 api_mode          = 2 [default = 0];
+    optional int32 act_mode          = 3 [default = 0];
+    optional int32 conv_state_stride = 4;
+    optional int32 x_seq_stride      = 5;
+    optional int32 out_seq_stride    = 6;
+}

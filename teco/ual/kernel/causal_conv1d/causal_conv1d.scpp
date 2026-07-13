@@ -1,0 +1,119 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include "ual/kernel/causal_conv1d/causal_conv1d.h"
+#include "ual/kernel/macro.h"
+#include "teco_kernel_context.h"
+
+using namespace tecoops::ual::args;
+
+////  default implementation, for correctness verification and special cases when dim is not aligned
+__device__ __always_inline float compute_silu_scalar(float val) {
+    return val / (1.0f + expf(-val));
+}
+
+__global__ void teco_slave_causal_conv1d_half(CausalConv1dArgs arg) {
+    size_t batch = arg.batch;
+    size_t total_seqlen = arg.totalSeqLen;
+    size_t dim = arg.dim;
+    size_t width = arg.width;
+    size_t conv_state_stride = arg.convStateStride;
+    size_t x_seq_stride = arg.xSeqStride;
+    size_t out_seq_stride = arg.outSeqStride;
+    int pad_slot_id = arg.padSlotId;
+    half *x = (half *)arg.x;                   // [total_seqlen, dim]
+    half *conv_state = (half *)arg.convState;  // [-1, width-1, dim]
+    half *weight = (half *)arg.weight;         // [width, dim]
+    half *out = (half *)arg.out;
+    int *query_start_loc = (int *)arg.queryStartLoc;            // [batch + 1]
+    int *conv_state_indices = (int *)arg.convStateIndices;      // [batch]
+    int8_t *has_initial_state = (int8_t *)arg.hasInitialState;  // [batch]
+    int api_mode = arg.api_mode;
+
+    if (threadIdx == 0) {
+        for (size_t b = 0; b < batch; b++) {
+            int start_idx = query_start_loc ? query_start_loc[b] : b;
+            int end_idx = query_start_loc ? query_start_loc[b + 1] : b + 1;
+            int seq_len = end_idx - start_idx;
+
+            int cache_index = conv_state_indices ? conv_state_indices[b] : b;
+            if (pad_slot_id == cache_index) {
+                continue;
+            }
+
+            // NOLINT 获取当前 batch 对应的状态指针
+            half *current_state = conv_state + (cache_index * conv_state_stride);
+            int8_t use_conv_state =
+                (api_mode == 1) || (has_initial_state ? has_initial_state[b] : 0);
+
+            // NOLINT 遍历维度
+            for (size_t d = 0; d < dim; d++) {
+                // NOLINT 遍历时间步
+                float x0 = 0.f;
+                float x1 = 0.f;
+                float x2 = 0.f;
+                float x3 = 0.f;
+                for (int t = 0; t < seq_len; t++) {
+                    int current_token_pos = start_idx + t;
+                    if (t == 0) {
+                        x0 = use_conv_state ? current_state[0 * dim + d] : 0;
+                        x1 = use_conv_state ? current_state[1 * dim + d] : 0;
+                        x2 = use_conv_state ? current_state[2 * dim + d] : 0;
+                        x3 = x[current_token_pos * x_seq_stride + d];
+                    } else if (t == 1) {
+                        x0 = use_conv_state ? current_state[1 * dim + d] : 0;
+                        x1 = use_conv_state ? current_state[2 * dim + d] : 0;
+                        x2 = x[(current_token_pos - 1) * x_seq_stride + d];
+                        x3 = x[(current_token_pos - 0) * x_seq_stride + d];
+                    } else if (t == 2) {
+                        x0 = use_conv_state ? current_state[2 * dim + d] : 0;
+                        x1 = x[(current_token_pos - 2) * x_seq_stride + d];
+                        x2 = x[(current_token_pos - 1) * x_seq_stride + d];
+                        x3 = x[(current_token_pos - 0) * x_seq_stride + d];
+                    } else {
+                        x0 = x[(current_token_pos - 3) * x_seq_stride + d];
+                        x1 = x[(current_token_pos - 2) * x_seq_stride + d];
+                        x2 = x[(current_token_pos - 1) * x_seq_stride + d];
+                        x3 = x[(current_token_pos - 0) * x_seq_stride + d];
+                    }
+
+                    float w0 = weight[0 * dim + d];
+                    float w1 = weight[1 * dim + d];
+                    float w2 = weight[2 * dim + d];
+                    float w3 = weight[3 * dim + d];
+
+                    float sum = x0 * w0 + x1 * w1 + x2 * w2 + x3 * w3;
+
+                    out[current_token_pos * out_seq_stride + d] = (half)compute_silu_scalar(sum);
+                }
+                // update state
+                current_state[0 * dim + d] = (half)x1;
+                current_state[1 * dim + d] = (half)x2;
+                current_state[2 * dim + d] = (half)x3;
+            }
+        }
+    }
+}

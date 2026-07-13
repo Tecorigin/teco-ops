@@ -1,0 +1,139 @@
+op_name: "causal_conv1d"
+
+# Input[0]: x [total_seqlen, dim]
+#   batch=2, totalSeqLen=16 (6+10)
+input {
+  id: "x"
+  shape: {
+    dims: 16
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 42
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+# Input[1]: weight [width, dim]   width=4
+input {
+  id: "weight"
+  shape: {
+    dims: 4
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 43
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+# Input[2]: query_start_loc [batch+1]   batch=2
+input {
+  id: "query_start_loc"
+  shape: {
+    dims: 3
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value: {
+    value_i: 0
+    value_i: 6
+    value_i: 16
+  }
+}
+
+# Input[3]: cache_indices / convStateIndices [batch]
+input {
+  id: "cache_indices"
+  shape: {
+    dims: 2
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value: {
+    value_i: 0
+    value_i: 1
+  }
+}
+
+# Input[4]: has_initial_state [batch]   0 = 均无初始状态
+input {
+  id: "has_initial_state"
+  shape: {
+    dims: 2
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value: {
+    value_i: 0
+    value_i: 0
+  }
+}
+
+# Input[5]: convState initial [batch, width-1, dim]
+input {
+  id: "convState"
+  shape: {
+    dims: 2
+    dims: 3
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 44
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+# Output[0]: out [total_seqlen, dim]
+output {
+  id: "out"
+  shape: {
+    dims: 16
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+# Output[1]: convState updated [batch, width-1, dim]
+output {
+  id: "convState_out"
+  shape: {
+    dims: 2
+    dims: 3
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+tecokernel_param: {
+  causal_conv1d_param: {
+    pad_slot_id: -1
+    api_mode: 0
+    act_mode: 0
+    conv_state_stride: 6144
+    x_seq_stride: 2048
+    out_seq_stride: 2048
+  }
+}

@@ -162,10 +162,52 @@ void flash_attn_varlen_func_torch(
     tecoopsDestroyTensorDescriptor(oDataDesc);
 }
 
+void causal_conv1d_fn_torch(
+    torch::Tensor out,          // [dim, totalSeqLen]  (modified in-place)
+    torch::Tensor conv_states,  // [num_entries, convStateLen, dim]  (modified in-place)
+    torch::Tensor x,            // [dim, totalSeqLen]
+    torch::Tensor weight,       // [width, dim]
+    torch::Tensor query_start_loc,  // [batch+1] int32
+    torch::Tensor cache_indices,    // [batch] int32
+    torch::Tensor has_initial_state, // [batch] int8
+    int64_t pad_slot_id) {
+    tecoopsHandle_t handle = getGlobalHandle();
+
+    int dim = x.size(0);
+    int totalSeqLen = x.size(1);
+    int batch = query_start_loc.size(0) - 1;
+    int width = weight.size(0);
+    int convStateStride = conv_states.stride(0);
+    int xSeqStride = dim;
+    int outSeqStride = dim;
+
+    // C API expects [totalSeqLen, dim]; torch passes [dim, totalSeqLen]
+    auto x_t = x.t().contiguous();
+    auto out_t = out.t().contiguous();
+
+    tecoopsCausalConv1d(
+        handle,
+        batch, totalSeqLen, dim, width,
+        convStateStride, xSeqStride, outSeqStride,
+        pad_slot_id,
+        /*api_mode=*/0, /*actMode=*/0,
+        x_t.data_ptr(),
+        conv_states.data_ptr(),
+        weight.data_ptr(),
+        out_t.data_ptr(),
+        query_start_loc.data_ptr<int>(),
+        cache_indices.data_ptr<int>(),
+        has_initial_state.data_ptr<int8_t>());
+
+    // Copy result from [totalSeqLen, dim] back to original out [dim, totalSeqLen]
+    out.copy_(out_t.t());
+}
+
 PYBIND11_MODULE(_torch_ext, m) {
     m.def("flatten_rays", &flatten_rays_torch, "flatten_rays (SDAA)");
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
     m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
     m.def("flash_attn_varlen_func", &flash_attn_varlen_func_torch, "flash_attn_varlen_func (SDAA)");
+    m.def("causal_conv1d_fn_torch", &causal_conv1d_fn_torch, "causal_conv1d_fn_torch (SDAA)");
 }

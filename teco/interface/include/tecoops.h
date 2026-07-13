@@ -28,6 +28,7 @@
 #define TECOOPS_INTERFACE_INCLUDE_TECOOPS_H_
 
 #include <sdaa_runtime.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -155,7 +156,7 @@ tecoopsStatus_t tecoopsRmsNorm(
 tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
                                       int max_seqlen_q, int max_seqlen_k,
                                       int max_block_num, const int *q_seq_lens,
-                                      const int *kv_seq_lens, 
+                                      const int *kv_seq_lens,
                                       const tecoopsTensorDescriptor_t blockTableDesc,
                                       const void *blockTable,
                                       const tecoopsTensorDescriptor_t qDataDesc,
@@ -166,6 +167,25 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
                                       const void *vCache,
                                       const tecoopsTensorDescriptor_t oDataDesc,
                                       void *oData, void *workspace);
+
+tecoopsStatus_t tecoopsCausalConv1d(tecoopsHandle_t handle,
+                                    int batch,
+                                    int totalSeqLen,
+                                    int dim,
+                                    int width,
+                                    int convStateStride,
+                                    int xSeqStride,
+                                    int outSeqStride,
+                                    int padSlotId,
+                                    int api_mode,
+                                    int actMode,
+                                    const void *x,
+                                    void *convState,
+                                    const void *weight,
+                                    void *out,
+                                    const int *queryStartLoc,
+                                    const int *convStateIndices,
+                                    const int8_t *hasInitialState);
 
 #ifdef __cplusplus
 }
