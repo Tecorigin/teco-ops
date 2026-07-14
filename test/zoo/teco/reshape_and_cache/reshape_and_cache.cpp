@@ -28,6 +28,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 #include "zoo/teco/convert.h"
 #include "common/time.hpp"
 #include "zoo/teco/reshape_and_cache/reshape_and_cache.h"
@@ -72,11 +73,22 @@ void ReshapeAndCacheExecutor::paramGeneration() {
     // output tensors (reused)
     key_cache_   = dev_output[0];
     value_cache_ = dev_output[1];
+
+    // 确保 slot_mapping 无碰撞：用顺序值 [0, 1, ..., num_tokens-1] 覆盖随机值
+    // 避免 32 SPE 并行写入同一 slot 时产生 race condition
+    std::vector<int64_t> unique_slots(num_tokens_);
+    for (int t = 0; t < num_tokens_; t++) {
+        unique_slots[t] = t;
+    }
+    sdaaMemcpy(slot_mapping_, unique_slots.data(),
+               num_tokens_ * sizeof(int64_t), sdaaMemcpyHostToDevice);
 }
 
 void ReshapeAndCacheExecutor::compute() {
-    // slot_mapping 在 prototxt 中是 DTYPE_INT64, C API 接受 const int64_t*
-    // device 端数据已经是 int64_t，直接传入即可
+    int cache_size = num_blocks_ * num_kv_heads_ * block_size_ * head_size_ * sizeof(short);
+    sdaaMemset(key_cache_, 0, cache_size);
+    sdaaMemset(value_cache_, 0, cache_size);
+
     checkTECOOPS(tecoopsReshapeAndCache(
         handle_,
         key_, value_,
@@ -109,6 +121,11 @@ void ReshapeAndCacheExecutor::cpuCompute() {
     int H = num_kv_heads_;
     int D = head_size_;
     int BS = block_size_;
+
+    // 确保 slot_mapping 无碰撞（与 paramGeneration 保持一致）
+    for (int t = 0; t < num_tokens_; t++) {
+        slot_baseline[t] = t;
+    }
 
     // baseline_output 初始化为 0（避免未初始化值触发 NaN 警告）
     memset(kc_baseline, 0, num_blocks_ * H * BS * D * sizeof(short));
