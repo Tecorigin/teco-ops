@@ -82,12 +82,14 @@ void ReshapeAndCacheExecutor::paramGeneration() {
     }
     sdaaMemcpy(slot_mapping_, unique_slots.data(),
                num_tokens_ * sizeof(int64_t), sdaaMemcpyHostToDevice);
-}
 
-void ReshapeAndCacheExecutor::compute() {
     int cache_size = num_blocks_ * num_kv_heads_ * block_size_ * head_size_ * sizeof(short);
     sdaaMemset(key_cache_, 0, cache_size);
     sdaaMemset(value_cache_, 0, cache_size);
+}
+
+void ReshapeAndCacheExecutor::compute() {
+
 
     checkTECOOPS(tecoopsReshapeAndCache(
         handle_,
