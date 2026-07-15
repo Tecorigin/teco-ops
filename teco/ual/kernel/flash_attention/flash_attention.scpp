@@ -256,7 +256,7 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                     auto tensorC = make_tensor<2>((float *)outc,
                         {static_cast<size_t>(BM), static_cast<size_t>(BN)});
 
-                    matmul.compute_async<128, 32, MatmulDataLayout::DataBkn32Block>(
+                    matmul.compute_async<MatmulBlockConfig::M128_N32>(
                         tensorQ, tensorK, /*is_lastk=*/true);
                     matmul.storeC_spm_async(tensorC);
                     matmul.wait_storeC(1);
@@ -343,7 +343,7 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                     auto tP = make_tensor<2>(p_score, {(size_t)BM, (size_t)BN});
                     auto tV = make_tensor<2>(vbuf, {(size_t)BN, (size_t)gemm_bn});
                     auto tO = make_tensor<2>((float *)outO, {(size_t)BM, (size_t)gemm_bn});
-                    matmul.compute_async<128, 32, MatmulDataLayout::DataBkn32Block>(tP, tV, true);
+                    matmul.compute_async<MatmulBlockConfig::M128_N32>(tP, tV, true);
                     matmul.storeC_spm_async(tO);
                     matmul.wait_storeC(1);
 
