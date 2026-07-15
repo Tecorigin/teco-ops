@@ -110,7 +110,7 @@ CONFIGS = [
 ]
 
 
-def test_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim):
+def check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim):
     print(f"  Config: {name} (hidden={hidden}, kv_heads={kv_heads}, head_dim={head_dim})")
 
     num_tokens = 512
@@ -148,7 +148,7 @@ def test_reshape_and_cache():
 
     all_ok = True
     for name, hidden, q_heads, kv_heads, head_dim in CONFIGS:
-        ok = test_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim)
+        ok = check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim)
         all_ok = all_ok and ok
 
     assert all_ok, "FAILED"

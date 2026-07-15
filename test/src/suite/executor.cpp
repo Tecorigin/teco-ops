@@ -1671,18 +1671,18 @@ void Executor::outputFromFile() {
 }
 
 void Executor::removeCaseData() {
-    // removeDir(data_path_);
-    for (int index = 0; index < reuse_params_.size(); index++) {
-        remove(reuse_params_[index].c_str());
-    }
-    for (int index = 0; index < output_params_.size(); index++) {
-        remove(output_params_[index].c_str());
-    }
-    std::string filename = subReplaceFirst(eva_res_.case_path, ".prototxt", "/cuda_cpu_diff.json");
-    struct stat buf;
-    if (stat(filename.c_str(), &buf) != -1) {
-        remove(filename.c_str());
-    }
+    removeDir(data_path_);
+    // for (int index = 0; index < reuse_params_.size(); index++) {
+    //     remove(reuse_params_[index].c_str());
+    // }
+    // for (int index = 0; index < output_params_.size(); index++) {
+    //     remove(output_params_[index].c_str());
+    // }
+    // std::string filename = subReplaceFirst(eva_res_.case_path, ".prototxt", "/cuda_cpu_diff.json");
+    // struct stat buf;
+    // if (stat(filename.c_str(), &buf) != -1) {
+    //     remove(filename.c_str());
+    // }
 }
 
 bool Executor::isDataExists() {
