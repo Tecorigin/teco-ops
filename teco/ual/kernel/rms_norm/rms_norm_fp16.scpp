@@ -26,7 +26,7 @@
 
 // rms_norm: RMS Normalization + optional residual add
 // 数据搬运: memcpy_async + memcpy_wait + MemcpyHandle (双缓冲流水)
-// 多核划分: Hal Tile R1C32_CR
+// 多核划分: spe_num 均匀分配，兼容任意 N (包括 N < 32)
 
 #include <simd.h>
 #include <slave.h>
@@ -34,95 +34,157 @@
 #include "ual/com/rt.h"
 #include "ual/kernel/rms_norm/rms_norm.h"
 
-#include "teco_hal_tensor.hpp"
-#include "teco_hal_tile.hpp"
-
 using namespace tecoops::ual::args;  // NOLINT
-using namespace teco::hal;            // NOLINT
-using namespace sdaa;                 // NOLINT
+using namespace sdaa;                // NOLINT
 
-// 双缓冲宏 (参考 reduce_variance_axis_right_float.scpp)
 #define CDBUF(x) (buf_dbflag == 0 ? x##0 : x##1)
 #define ADBUF(x) (buf_dbflag == 0 ? x##1 : x##0)
-#define EXDBF    buf_dbflag = 1 - buf_dbflag
+#define EXDBF buf_dbflag = 1 - buf_dbflag
 
 // ================================================================
-// Kernel 0: 纯 RMSNorm (双缓冲流水 + MemcpyHandle)
+// Kernel 0: Pure RMSNorm
 // ================================================================
 __global__ void teco_slave_rms_norm_fp16(RmsNormArgs args) {
     const int N = args.num_tokens;
     const int D = args.hidden_size;
     const float eps = args.eps;
+    const int launched_cores = args.spe_num;
 
-    half *input_hbm  = static_cast<half *>(const_cast<void *>(args.input));
-    half *weight_hbm = static_cast<half *>(const_cast<void *>(args.weight));
-    half *output_hbm = static_cast<half *>(args.output);
+    if (N <= 0 || D <= 0 ||
+        launched_cores <= 0 || launched_cores > 32) {
+        return;
+    }
 
-    // Step 1: Hal Tensor 包装
-    Tensor<half, 2> input_gm(input_hbm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+    half *input_hbm =
+        static_cast<half *>(const_cast<void *>(args.input));
+    half *weight_hbm =
+        static_cast<half *>(const_cast<void *>(args.weight));
+    half *output_hbm =
+        static_cast<half *>(args.output);
 
-    // Step 2: Hal Tile R1C32_CR 行并行
-    auto tile = make_tile<SplitMode::R1C32_CR>(
-        input_gm, {static_cast<size_t>(N), static_cast<size_t>(D)});
-    auto block = tile.compute_core_block_shape();
-    int my_rows = static_cast<int>(block[0]);
-    if (my_rows == 0) return;
+    if (input_hbm == nullptr ||
+        weight_hbm == nullptr ||
+        output_hbm == nullptr) {
+        return;
+    }
 
-    // Step 3: SPM 分配 (in0/in1/out0/out1/weight)
-    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
-    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 5));
-    half *in0   = spm_base;
-    half *in1   = in0 + D;
-    half *out0  = in1 + D;
-    half *out1  = out0 + D;
+    // 实际参与工作的 core 数量。
+    // N < launched_cores 时，只启用前 N 个 core。
+    const int worker_count =
+        N < launched_cores ? N : launched_cores;
+    const int core_id = threadIdx;
+
+    if (core_id >= worker_count) {
+        return;
+    }
+
+    // 将 N 行均匀分配给 worker_count 个 core。
+    const int base_rows = N / worker_count;
+    const int remainder = N % worker_count;
+
+    const int my_rows =
+        base_rows + (core_id < remainder ? 1 : 0);
+
+    const int extra_before =
+        core_id < remainder ? core_id : remainder;
+
+    const int start_row =
+        core_id * base_rows + extra_before;
+
+    const size_t offset =
+        static_cast<size_t>(start_row) *
+        static_cast<size_t>(D);
+
+    const size_t row_bytes =
+        static_cast<size_t>(D) * sizeof(half);
+
+    // in0, in1, out0, out1, weight
+    half *spm_base =
+        static_cast<half *>(rt_spm_malloc(row_bytes * 5));
+
+    if (spm_base == nullptr) {
+        return;
+    }
+
+    half *in0 = spm_base;
+    half *in1 = in0 + D;
+    half *out0 = in1 + D;
+    half *out1 = out0 + D;
     half *weight = out1 + D;
 
+    MemcpyHandle weight_handle;
     MemcpyHandle get_handle[2];
     MemcpyHandle put_handle[2];
+
     int buf_dbflag = 0;
 
-    size_t offset = tile.compute_linear_index();
+    // 每个有效 core 加载一份相同的 weight。
+    memcpy_async(
+        weight,
+        weight_hbm,
+        row_bytes,
+        MemcpyGlobalToSpm,
+        weight_handle);
+    memcpy_wait(weight_handle);
 
-    // Step 4: 加载 weight (只一次)
-    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_handle[0]);
-    memcpy_wait(get_handle[0]);
+    // 预取当前 core 的第一行。
+    memcpy_async(
+        in0,
+        input_hbm + offset,
+        row_bytes,
+        MemcpyGlobalToSpm,
+        get_handle[0]);
 
-    // Step 5: 预取第一行
-    memcpy_async(CDBUF(in), input_hbm + offset, row_bytes,
-                 MemcpyGlobalToSpm, get_handle[0]);
-    memcpy_wait(get_handle[0]);
-
-    // Step 6: 流水循环: load 下一行 ⇄ 计算当前行
     for (int r = 0; r < my_rows; ++r) {
-        // 6a. 发起下一行加载到 alternate buffer (与计算重叠)
+        // 预取下一行到另一个 buffer。
         if (r + 1 < my_rows) {
-            memcpy_async(ADBUF(in), input_hbm + offset + (r + 1) * D,
-                         row_bytes, MemcpyGlobalToSpm, get_handle[1 - buf_dbflag]);
+            memcpy_async(
+                ADBUF(in),
+                input_hbm + offset +
+                    static_cast<size_t>(r + 1) * D,
+                row_bytes,
+                MemcpyGlobalToSpm,
+                get_handle[1 - buf_dbflag]);
         }
 
-        // 6b. 等待当前 load + 上一轮 store
+        // 当前句柄一定已经由 memcpy_async 发起。
         memcpy_wait(get_handle[buf_dbflag]);
-        memcpy_wait(put_handle[buf_dbflag]);
 
-        // 6c. RMS Norm 计算
         float sum_sq = 0.0f;
+
         for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(in)[d]);
-            sum_sq += val * val;
-        }
-        float rstd = 1.0f / sqrtf(sum_sq / static_cast<float>(D) + eps);
-        for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(in)[d]) * rstd
-                        * static_cast<float>(weight[d]);
-            CDBUF(out)[d] = static_cast<half>(val);
+            const float value =
+                static_cast<float>(CDBUF(in)[d]);
+            sum_sq += value * value;
         }
 
-        // 6d. 发起写回 + 等待完成
-        memcpy_async(output_hbm + offset + r * D, CDBUF(out),
-                     row_bytes, MemcpySpmToGlobal, put_handle[buf_dbflag]);
+        const float mean_sq =
+            sum_sq / static_cast<float>(D);
+
+        const float rstd =
+            1.0f / sqrtf(mean_sq + eps);
+
+        for (int d = 0; d < D; ++d) {
+            const float value =
+                static_cast<float>(CDBUF(in)[d]);
+
+            const float gamma =
+                static_cast<float>(weight[d]);
+
+            CDBUF(out)[d] =
+                static_cast<half>(value * rstd * gamma);
+        }
+
+        memcpy_async(
+            output_hbm + offset +
+                static_cast<size_t>(r) * D,
+            CDBUF(out),
+            row_bytes,
+            MemcpySpmToGlobal,
+            put_handle[buf_dbflag]);
+
         memcpy_wait(put_handle[buf_dbflag]);
 
-        // 6e. 交换 buffer
         if (r + 1 < my_rows) {
             EXDBF;
         }
@@ -132,100 +194,196 @@ __global__ void teco_slave_rms_norm_fp16(RmsNormArgs args) {
 }
 
 // ================================================================
-// Kernel 1: RMSNorm + residual add (双缓冲流水 + MemcpyHandle)
+// Kernel 1: Residual Add + RMSNorm
+// residual_out = input + residual
+// output = RMSNorm(residual_out) * weight
 // ================================================================
-__global__ void teco_slave_rms_norm_fp16_add(RmsNormArgs args) {
+__global__ void teco_slave_rms_norm_fp16_add(
+    RmsNormArgs args) {
     const int N = args.num_tokens;
     const int D = args.hidden_size;
     const float eps = args.eps;
+    const int launched_cores = args.spe_num;
 
-    half *input_hbm     = static_cast<half *>(const_cast<void *>(args.input));
-    half *weight_hbm    = static_cast<half *>(const_cast<void *>(args.weight));
-    half *residual_hbm  = static_cast<half *>(const_cast<void *>(args.residual));
-    half *output_hbm    = static_cast<half *>(args.output);
-    half *res_out_hbm   = static_cast<half *>(args.residual_out);
+    if (N <= 0 || D <= 0 ||
+        launched_cores <= 0 || launched_cores > 32) {
+        return;
+    }
 
-    // Step 1: Hal Tensor 包装
-    Tensor<half, 2> input_gm(input_hbm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+    half *input_hbm =
+        static_cast<half *>(const_cast<void *>(args.input));
+    half *weight_hbm =
+        static_cast<half *>(const_cast<void *>(args.weight));
+    half *residual_hbm =
+        static_cast<half *>(const_cast<void *>(args.residual));
+    half *output_hbm =
+        static_cast<half *>(args.output);
+    half *res_out_hbm =
+        static_cast<half *>(args.residual_out);
 
-    // Step 2: Hal Tile R1C32_CR 行并行
-    auto tile = make_tile<SplitMode::R1C32_CR>(
-        input_gm, {static_cast<size_t>(N), static_cast<size_t>(D)});
-    auto block = tile.compute_core_block_shape();
-    int my_rows = static_cast<int>(block[0]);
-    if (my_rows == 0) return;
+    if (input_hbm == nullptr ||
+        weight_hbm == nullptr ||
+        residual_hbm == nullptr ||
+        output_hbm == nullptr ||
+        res_out_hbm == nullptr) {
+        return;
+    }
 
-    // Step 3: SPM 分配 (in0/in1/res0/res1/out0/out1/weight)
-    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
-    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 7));
-    half *in0    = spm_base;
-    half *in1    = in0 + D;
-    half *res0   = in1 + D;
-    half *res1   = res0 + D;
-    half *out0   = res1 + D;
-    half *out1   = out0 + D;
+    const int worker_count =
+        N < launched_cores ? N : launched_cores;
+    const int core_id = threadIdx;
+
+    if (core_id >= worker_count) {
+        return;
+    }
+
+    const int base_rows = N / worker_count;
+    const int remainder = N % worker_count;
+
+    const int my_rows =
+        base_rows + (core_id < remainder ? 1 : 0);
+
+    const int extra_before =
+        core_id < remainder ? core_id : remainder;
+
+    const int start_row =
+        core_id * base_rows + extra_before;
+
+    const size_t offset =
+        static_cast<size_t>(start_row) *
+        static_cast<size_t>(D);
+
+    const size_t row_bytes =
+        static_cast<size_t>(D) * sizeof(half);
+
+    // in0, in1, res0, res1, out0, out1, weight
+    half *spm_base =
+        static_cast<half *>(rt_spm_malloc(row_bytes * 7));
+
+    if (spm_base == nullptr) {
+        return;
+    }
+
+    half *in0 = spm_base;
+    half *in1 = in0 + D;
+    half *res0 = in1 + D;
+    half *res1 = res0 + D;
+    half *out0 = res1 + D;
+    half *out1 = out0 + D;
     half *weight = out1 + D;
 
+    MemcpyHandle weight_handle;
     MemcpyHandle get_in_handle[2];
     MemcpyHandle get_res_handle[2];
     MemcpyHandle put_out_handle[2];
     MemcpyHandle put_res_handle[2];
+
     int buf_dbflag = 0;
 
-    size_t offset = tile.compute_linear_index();
+    memcpy_async(
+        weight,
+        weight_hbm,
+        row_bytes,
+        MemcpyGlobalToSpm,
+        weight_handle);
+    memcpy_wait(weight_handle);
 
-    // Step 4: 加载 weight (只一次)
-    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in_handle[0]);
-    memcpy_wait(get_in_handle[0]);
+    // 预取第一行 input 和 residual。
+    memcpy_async(
+        in0,
+        input_hbm + offset,
+        row_bytes,
+        MemcpyGlobalToSpm,
+        get_in_handle[0]);
 
-    // Step 5: 预取第一行 input + residual
-    memcpy_async(CDBUF(in),  input_hbm + offset,    row_bytes,
-                 MemcpyGlobalToSpm, get_in_handle[0]);
-    memcpy_async(CDBUF(res), residual_hbm + offset, row_bytes,
-                 MemcpyGlobalToSpm, get_res_handle[0]);
-    memcpy_wait(get_in_handle[0]);
-    memcpy_wait(get_res_handle[0]);
+    memcpy_async(
+        res0,
+        residual_hbm + offset,
+        row_bytes,
+        MemcpyGlobalToSpm,
+        get_res_handle[0]);
 
-    // Step 6: 流水循环: load 下一行 ⇄ 计算当前行
     for (int r = 0; r < my_rows; ++r) {
-        // 6a. 发起下一行加载到 alternate buffer (与计算重叠)
         if (r + 1 < my_rows) {
-            memcpy_async(ADBUF(in), input_hbm + offset + (r + 1) * D,
-                         row_bytes, MemcpyGlobalToSpm, get_in_handle[1 - buf_dbflag]);
-            memcpy_async(ADBUF(res), residual_hbm + offset + (r + 1) * D,
-                         row_bytes, MemcpyGlobalToSpm, get_res_handle[1 - buf_dbflag]);
+            const size_t next_offset =
+                offset + static_cast<size_t>(r + 1) * D;
+
+            memcpy_async(
+                ADBUF(in),
+                input_hbm + next_offset,
+                row_bytes,
+                MemcpyGlobalToSpm,
+                get_in_handle[1 - buf_dbflag]);
+
+            memcpy_async(
+                ADBUF(res),
+                residual_hbm + next_offset,
+                row_bytes,
+                MemcpyGlobalToSpm,
+                get_res_handle[1 - buf_dbflag]);
         }
 
-        // 6b. 等待当前 load + 上一轮 store
         memcpy_wait(get_in_handle[buf_dbflag]);
         memcpy_wait(get_res_handle[buf_dbflag]);
-        memcpy_wait(put_out_handle[buf_dbflag]);
-        memcpy_wait(put_res_handle[buf_dbflag]);
 
-        // 6c. Add residual + RMS Norm
         float sum_sq = 0.0f;
+
         for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(in)[d])
-                        + static_cast<float>(CDBUF(res)[d]);
-            CDBUF(res)[d] = static_cast<half>(val);  // residual_out
-            sum_sq += val * val;
-        }
-        float rstd = 1.0f / sqrtf(sum_sq / static_cast<float>(D) + eps);
-        for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(res)[d]) * rstd
-                        * static_cast<float>(weight[d]);
-            CDBUF(out)[d] = static_cast<half>(val);
+            const float input_value =
+                static_cast<float>(CDBUF(in)[d]);
+
+            const float residual_value =
+                static_cast<float>(CDBUF(res)[d]);
+
+            const float added_value =
+                input_value + residual_value;
+
+            // residual_out 使用 FP16 保存。
+            CDBUF(res)[d] =
+                static_cast<half>(added_value);
+
+            // 归一化统计使用 FP32 的加法结果。
+            sum_sq += added_value * added_value;
         }
 
-        // 6d. 发起写回 + 等待完成
-        memcpy_async(output_hbm + offset + r * D, CDBUF(out),
-                     row_bytes, MemcpySpmToGlobal, put_out_handle[buf_dbflag]);
-        memcpy_async(res_out_hbm + offset + r * D, CDBUF(res),
-                     row_bytes, MemcpySpmToGlobal, put_res_handle[buf_dbflag]);
+        const float mean_sq =
+            sum_sq / static_cast<float>(D);
+
+        const float rstd =
+            1.0f / sqrtf(mean_sq + eps);
+
+        for (int d = 0; d < D; ++d) {
+            const float residual_value =
+                static_cast<float>(CDBUF(res)[d]);
+
+            const float gamma =
+                static_cast<float>(weight[d]);
+
+            CDBUF(out)[d] =
+                static_cast<half>(
+                    residual_value * rstd * gamma);
+        }
+
+        const size_t current_offset =
+            offset + static_cast<size_t>(r) * D;
+
+        memcpy_async(
+            output_hbm + current_offset,
+            CDBUF(out),
+            row_bytes,
+            MemcpySpmToGlobal,
+            put_out_handle[buf_dbflag]);
+
+        memcpy_async(
+            res_out_hbm + current_offset,
+            CDBUF(res),
+            row_bytes,
+            MemcpySpmToGlobal,
+            put_res_handle[buf_dbflag]);
+
         memcpy_wait(put_out_handle[buf_dbflag]);
         memcpy_wait(put_res_handle[buf_dbflag]);
 
-        // 6e. 交换 buffer
         if (r + 1 < my_rows) {
             EXDBF;
         }
