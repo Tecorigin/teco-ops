@@ -126,7 +126,9 @@ void flash_attn_varlen_func_torch(
     auto q_lens = q_lens_cpu.to("sdaa");
 
     if (!out.defined()) {
-        out = torch::empty_like(q);
+        out = torch::zeros_like(q);
+    } else {
+        out.zero_();
     }
 
     tecoopsHandle_t handle = getGlobalHandle();
