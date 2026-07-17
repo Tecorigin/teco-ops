@@ -76,23 +76,6 @@ def check_inputs(param_path, input_lists, reuse_lists, output_lists):
 def cdiv(x, y):
     return (x + y - 1) // y
 
-
-def gen_block_table(batch_size, max_block_num, total_block_num,
-                    block_table_dim, block_size, seq_lens_cur, seq_lens_ctx_cache):
-    import random
-    assert total_block_num <= max_block_num
-    block_ids = random.sample(list(range(max_block_num)), k=total_block_num)
-    block_table = []
-    cu = 0
-    for batch_idx in range(batch_size):
-        seq_len = seq_lens_cur[batch_idx] + seq_lens_ctx_cache[batch_idx]
-        block_num = cdiv(seq_len, block_size)
-        row = [-1] * block_table_dim
-        row[:block_num] = block_ids[cu:cu + block_num]
-        block_table.append(row)
-        cu += block_num
-    return block_table
-
 def flash_attn_varlen_func(
     q,           # [total_q_tokens, num_heads, head_size]
     k_cache,     # [num_blocks, block_size, num_kv_heads, head_size]

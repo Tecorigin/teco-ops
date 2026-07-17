@@ -226,6 +226,13 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                                tid * args.size_per_head;
             size_t q_src_stride = (args.local_head_num - 1) * token_size;
             memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
+
+            // clear unused rows of qbuf (cur_BM < BM)
+            if (cur_BM < BM) {
+                for (int r = cur_BM * args.size_per_head; r < BM * args.size_per_head; r++) {
+                    qbuf[r] = 0;
+                }
+            }
     
             for (int j = 0; j < k_seq_len; j += BN) {
                 int cur_BN = MIN(BN, k_seq_len - j);
@@ -242,6 +249,15 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                 for (int t = 0; t < cur_BN; t++) {
                     for (int h = 0; h < args.size_per_head; h++) {
                         kbuf[h * BN + t] = ktmp[t * args.size_per_head + h];
+                    }
+                }
+
+                // clear unused columns of kbuf (cur_BN < BN)
+                if (cur_BN < BN) {
+                    for (int h = 0; h < args.size_per_head; h++) {
+                        for (int c = cur_BN; c < BN; c++) {
+                            kbuf[h * BN + c] = 0;
+                        }
                     }
                 }
 
@@ -337,6 +353,12 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                                   cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
                                   {0, (args.size_per_head - gemm_bn) * sizeof(half)});
 
+                    // clear unused rows of vbuf (cur_BN < BN)
+                    if (cur_BN < BN) {
+                        for (int r = cur_BN * gemm_bn; r < BN * gemm_bn; r++) {
+                            vbuf[r] = 0;
+                        }
+                    }
 
                     MatmulConfig cfg;
                     Matmul matmul(cfg);
