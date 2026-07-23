@@ -112,7 +112,7 @@ void flash_attn_varlen_func_torch(
     bool return_softmax_lse,
     torch::Tensor out) {
 
-    int batch_size = q.size(0);
+    int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
     // parse q_seq_lens
