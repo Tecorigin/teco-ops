@@ -29,6 +29,7 @@ import math
 import random
 import torch
 import torch_sdaa
+import _bootstrap
 import tecoops
 import numpy as np
 

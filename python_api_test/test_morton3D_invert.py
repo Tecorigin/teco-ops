@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 import torch_sdaa
+import _bootstrap
 import tecoops
 
 

@@ -12,6 +12,7 @@ It flattens the rays into a 1D array where each position is filled with the ray 
 
 import torch
 import torch_sdaa
+import _bootstrap
 import tecoops
 import numpy as np
 

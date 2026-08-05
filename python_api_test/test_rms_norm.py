@@ -25,6 +25,7 @@
 # OF SUCH DAMAGE.
 """精度测试：tecoops.rms_norm vs PyTorch 参考实现"""
 import torch
+import _bootstrap
 import tecoops
 
 
