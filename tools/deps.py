@@ -25,11 +25,11 @@ deps = []
 arch = get_arch()
 if arch == 'x86':
     deps.append({
-        "src": "http://wb.tecorigin.com:8082/repository/teco-3rd-repo/tecohal/ubuntu22.04/x86_64/0.0.1/tecohal_0.0.1b0.tar.gz",
+        "src": "http://wb.tecorigin.com:8082/repository/teco-3rd-repo/tecohal/ubuntu22.04/x86_64/0.0.2/tecohal_0.0.2b0.tar.gz",
         "build": "teco-hal"})
 elif arch == 'loongson':
     deps.append({
-        "src": "http://wb.tecorigin.com:8082/repository/teco-3rd-repo/tecohal/LoongnixServer/23.1/Loongson_loongarch64/0.0.1/tecohal_0.0.1b0.tar.gz",
+        "src": "http://wb.tecorigin.com:8082/repository/teco-3rd-repo/tecohal/LoongnixServer/23.1/Loongson_loongarch64/0.0.2/tecohal_0.0.2b0.tar.gz",
         "build": "teco-hal"})
 
 for dep in deps:
