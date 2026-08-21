@@ -90,43 +90,19 @@ __device__ float compute_max(float *input, int size) {
     float result = -FLT_MAX;
     int i = 0;
 
-    for (i = 0; i < size; i += 16) {
+    for (i = 0; i <= size - 16; i += 16) {
         simd_load(vf, input + i);
         vres = simd_max(vf, vres);
     }
 
-    for (; i < size % 16; i++) {
+    // handle remaining elements (size not multiple of 16)
+    for (; i < size; i++) {
         result = MAX(result, input[i]);
     }
 
     float *tmp = (float *)&vres;
     for (int j = 0; j < 16; j++) {
         result = MAX(result, tmp[j]);
-    }
-    return result;
-}
-
-__device__ float compute_exp_sum(float *input, float max, int size) {
-    floatv16 vf = 0.0f;
-    floatv16 vres = 0.0f;
-    floatv16 vmax = max;
-    float result = 0.0f;
-    int i = 0;
-    int remainder = size % 16;
-
-    for (i = 0; i < size; i += 16) {
-        simd_load(vf, input + i);
-        vf = simd_exp(vf - vmax);
-        vres = simd_add(vres, vf);
-    }
-
-    for (; i < remainder; i++) {
-        result += expf(input[i] - max);
-    }
-
-    float *tmp = (float *)&vres;
-    for (int j = 0; j < 16; j++) {
-        result += tmp[j];
     }
     return result;
 }
@@ -146,7 +122,7 @@ __device__ void online_softmax_step(
         float *src_row = scores + i * ld_scores;
         float m_block = compute_max(src_row, n);
         float m_new = MAX(pre_max[i], m_block);
-        m_new = MAX(m_new, 0.0f);
+        // m_new = MAX(m_new, 0.0f);
         cur_max[i] = m_new;
         scale[i] = expf(pre_max[i] - m_new);
     }
@@ -160,7 +136,7 @@ __device__ void online_softmax_step(
 
         float l_block = 0.0f;
         int j = 0;
-        for (; j + 16 <= n; j += 16) {
+        for (; j <= n - 16; j += 16) {
             floatv16 v;
             simd_load(v, src_row + j);
             v = simd_exp(v - m_new);
@@ -283,7 +259,7 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                     floatv16 vscale = args.softmax_scale;
                     int total = BM * BN;
                     int si = 0;
-                    for (; si + 16 <= total; si += 16) {
+                    for (; si <= total - 16; si += 16) {
                         floatv16 v;
                         simd_load(v, outc + si);
                         v = simd_mul(v, vscale);
@@ -385,12 +361,13 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
 
             // normalize O_accum by l and convert to half
             for (int row = 0; row < cur_BM_q; row++) {
-                float l_inv = l_ptr[row] > 0.0f ? 1.0f / l_ptr[row] : 0.0f;
+                // float l_inv = l_ptr[row] > 0.0f ? 1.0f / l_ptr[row] : 0.0f;
+                float l_inv = 1.0f / l_ptr[row];
                 floatv16 vl_inv = l_inv;
                 float *o_row = o_accum + row * args.size_per_head;
                 half *obuf_row = obuf + row * args.size_per_head;
                 int k = 0;
-                for (; k + 16 <= args.size_per_head; k += 16) {
+                for (; k <= args.size_per_head - 16; k += 16) {
                     floatv16 vf;
                     halfv16 vh;
                     simd_load(vf, o_row + k);
