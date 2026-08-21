@@ -27,6 +27,8 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <fstream>   // std::ofstream
+#include <cstdlib>   // system()
 #include <torch/extension.h>
 #include <torch_sdaa/sdaa_extension.h>
 
@@ -111,6 +113,51 @@ void flash_attn_varlen_func_torch(
     torch::Tensor block_table,
     bool return_softmax_lse,
     torch::Tensor out) {
+    
+    // ============================================================
+    // Dump all input tensors to .pt files for debugging
+    // ============================================================
+    static int dump_counter = 0;
+    std::string dump_dir = "python_api_test/pt/";
+    
+    // 创建目录（如果不存在）
+    std::string mkdir_cmd = "mkdir -p " + dump_dir;
+    system(mkdir_cmd.c_str());
+    
+    // 生成文件名前缀
+    std::string prefix = dump_dir;
+    
+    // Dump 每个 tensor
+    torch::save(q, prefix + "q.pt");
+    torch::save(k, prefix + "k.pt");
+    torch::save(v, prefix + "v.pt");
+    torch::save(cu_seqlens_q, prefix + "cu_seqlens_q.pt");
+    torch::save(cu_seqlens_k, prefix + "cu_seqlens_k.pt");
+    torch::save(seqused_k, prefix + "seqused_k.pt");
+    torch::save(block_table, prefix + "block_table.pt");
+    torch::save(window_size, prefix + "window_size.pt");
+    torch::save(out, prefix + "out_before.pt");
+    
+    // 保存标量参数
+    std::ofstream meta_file(prefix + "meta.txt");
+    if (meta_file.is_open()) {
+        meta_file << "max_seqlen_q: " << max_seqlen_q << "\n";
+        meta_file << "max_seqlen_k: " << max_seqlen_k << "\n";
+        meta_file << "softmax_scale: " << softmax_scale << "\n";
+        meta_file << "causal: " << (causal ? "true" : "false") << "\n";
+        meta_file << "return_softmax_lse: " << (return_softmax_lse ? "true" : "false") << "\n";
+        meta_file << "batch_size: " << seqused_k.size(0) << "\n";
+        meta_file << "max_block_num: " << k.size(0) << "\n";
+        meta_file << "num_heads: " << q.size(1) << "\n";
+        meta_file << "num_kv_heads: " << k.size(1) << "\n";
+        meta_file << "head_size: " << q.size(2) << "\n";
+        meta_file << "block_size: " << k.size(2) << "\n";
+        meta_file.close();
+    }
+    
+    // 打印 dump 信息
+    std::cout << "[FA Dump] Saved to: " << prefix << "*.pt\n";
+    // ============================================================
 
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
