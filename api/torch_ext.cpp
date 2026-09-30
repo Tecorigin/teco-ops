@@ -115,15 +115,17 @@ void flash_attn_varlen_func_torch(
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
-    // parse q_seq_lens
-    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
-    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
-    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
-    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
-    for (int b = 0; b < batch_size; b++) {
-        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
-    }
-    auto q_lens = q_lens_cpu.to("sdaa");
+    // The kernel consumes q_seq_lens on device. Derive it from the device-side
+    // cumulative lengths without a D2H sync followed by an H2D copy. The
+    // subtraction produces a contiguous [batch_size] tensor for the ABI.
+    auto q_lens = (
+        cu_seqlens_q.narrow(0, 1, batch_size) -
+        cu_seqlens_q.narrow(0, 0, batch_size)).contiguous();
+
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the Teco-Ops launch ordered with the device-side metadata
+    // subtraction and the caller's other PyTorch work.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
 
     if (!out.defined()) {
         out = torch::zeros_like(q);
@@ -131,7 +133,6 @@ void flash_attn_varlen_func_torch(
         out.zero_();
     }
 
-    tecoopsHandle_t handle = getGlobalHandle();
     tecoopsTensorDescriptor_t blockTableDesc, qDataDesc, kCacheDesc, vCacheDesc, oDataDesc;
     auto make_desc = [&](tecoopsTensorDescriptor_t &desc, tecoopsDataType_t dtype,
                          torch::Tensor &t) {

@@ -95,8 +95,8 @@ tecoopsFlashAttention参数信息
 | max_seqlen_q   | 输入      | 主机端        | 最大 query 序列长度                                                |
 | max_seqlen_k   | 输入      | 主机端        | 最大 KV 序列长度                                                   |
 | max_block_num  | 输入      | 主机端        | KV cache 中最大 block 数量                                         |
-| q_seq_lens     | 输入      | 主机端        | 每 batch 的 query 长度，`[batch_size]`                           |
-| kv_seq_lens    | 输入      | 主机端        | 每 batch 的 KV 长度，`[batch_size]`                              |
+| q_seq_lens     | 输入      | 设备端        | 每 batch 的 query 长度，`[batch_size]`                           |
+| kv_seq_lens    | 输入      | 设备端        | 每 batch 的 KV 长度，`[batch_size]`                              |
 | blockTableDesc | 输入      | 主机端        | block table 描述符                                                 |
 | blockTable     | 输入      | 设备端        | block id 映射表，`[batch_size, block_table_dim]` int32           |
 | qDataDesc      | 输入      | 主机端        | Q 数据描述符                                                       |
@@ -125,6 +125,15 @@ tecoopsFlashAttention参数信息
 | kv_seq_lens   | int32    | `[batch_size]`                                     | Array    |
 | oData         | float16  | `[total_q, num_heads, head_size]`                  | Array    |
 | workspace     | void*    | 标量                                                 | -        |
+
+### PyTorch 绑定的变长元数据
+
+SDAA kernel 直接读取设备端的 `q_seq_lens` 与 `kv_seq_lens` 指针。PyTorch
+绑定从设备端 `cu_seqlens_q` 的相邻元素差分生成连续的 `q_seq_lens`，不把
+累积长度拷回 CPU，也不再把派生数组复制回设备；`seqused_k` 直接作为
+`kv_seq_lens` 使用。绑定在派发前把句柄绑定到调用方当前 SDAA stream，保证
+元数据差分与 attention kernel 的顺序。这样保持 C API 的 `[batch_size]` ABI
+不变，同时避免每次变长调用的主机同步。
 
 ## 性能优化
 
