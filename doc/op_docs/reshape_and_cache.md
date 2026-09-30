@@ -29,6 +29,10 @@
 - `key_cache`：输出的分页 key cache，形状 `[num_blocks, num_kv_heads, block_size, head_size]`
 - `value_cache`：输出的分页 value cache，形状同 key_cache
 
+> **PyTorch ABI 说明**：设备 kernel 根据逻辑 shape 计算连续 byte offset，接口不接收
+> PyTorch stride。PyTorch 绑定会在调用边界将 `key`/`value` 这两个只读输入物化为
+> contiguous layout，以兼容 vLLM 的非连续 fused-QKV view；cache 输出仍直接原地写入。
+
 ## 功能实现
 
 ### 接口设计

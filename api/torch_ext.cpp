@@ -63,15 +63,21 @@ void reshape_and_cache_torch(
     torch::Tensor slot_mapping,
     torch::Tensor key_cache, torch::Tensor value_cache) {
     tecoopsHandle_t handle = getGlobalHandle();
-    int num_tokens = key.size(0);
-    int num_kv_heads = key.size(1);
-    int head_size = key.size(2);
+    // The device ABI derives byte offsets from the logical shape and does not
+    // receive PyTorch stride metadata. vLLM can pass a non-contiguous fused
+    // QKV view here, so materialize only the read-only inputs at this ABI
+    // boundary. Cache tensors remain in-place outputs and are not copied.
+    auto key_dense = key.contiguous();
+    auto value_dense = value.contiguous();
+    int num_tokens = key_dense.size(0);
+    int num_kv_heads = key_dense.size(1);
+    int head_size = key_dense.size(2);
     int num_blocks = key_cache.size(0);
     int block_size = key_cache.size(2);
 
     tecoopsReshapeAndCache(
         handle,
-        key.data_ptr(), value.data_ptr(),
+        key_dense.data_ptr(), value_dense.data_ptr(),
         slot_mapping.data_ptr<int64_t>(),
         key_cache.data_ptr(), value_cache.data_ptr(),
         num_tokens, num_kv_heads, head_size,
