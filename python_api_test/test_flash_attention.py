@@ -199,7 +199,8 @@ def _run_one_fa_test(
     cu_seqlens_q = cu_seqlens_q.to("sdaa")
     seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
     bt_dev = block_table.to("sdaa")
-    out_dev = torch.empty_like(q_dev)
+    # Seed the output so a missing write cannot be hidden by an empty tensor.
+    out_dev = torch.full_like(q_dev, 7.0)
 
     tecoops.flash_attn_varlen_func(
         q_dev, k_dev, v_dev,

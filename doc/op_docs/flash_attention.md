@@ -109,6 +109,13 @@ tecoopsFlashAttention参数信息
 | oData          | 输出      | 设备端        | 输出矩阵，`[total_q, num_heads, head_size]` half                 |
 | workspace      | 输入      | 设备端        | 工作空间（当前未使用）                                             |
 
+### 输出初始化契约
+
+`tecoopsFlashAttention` 会覆盖全部 `[total_q, num_heads, head_size]` 输出元素。PyTorch
+绑定在 `out` 未提供时使用 `empty_like`，在 `out` 已提供时直接写入，不再为每次调用执行整块
+设备清零。调用方必须传入与 `q` 同形状、可写的输出张量；API focused test 用 `7.0` 哨兵预填
+输出并与参考结果逐元素比较，以便暴露任何未写入区域。
+
 ### 类型限制
 
 | 参数          | 数据类型 | 维度信息                                             | 存储格式 |
