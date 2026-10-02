@@ -205,6 +205,61 @@ void causal_conv1d_fn_torch(
     out.copy_(out_t.t());
 }
 
+torch::Tensor ms_deform_attn_forward_torch(
+    torch::Tensor value,
+    torch::Tensor spatial_shapes,
+    torch::Tensor sampling_locations,
+    torch::Tensor attention_weights) {
+    TORCH_CHECK(value.dim() == 4, "value must have shape [N, S, M, D]");
+    TORCH_CHECK(spatial_shapes.dim() == 2 && spatial_shapes.size(1) == 2,
+                "spatial_shapes must have shape [L, 2]");
+    TORCH_CHECK(sampling_locations.dim() == 6 && sampling_locations.size(5) == 2,
+                "sampling_locations must have shape [N, Lq, M, L, P, 2]");
+    TORCH_CHECK(attention_weights.dim() == 5,
+                "attention_weights must have shape [N, Lq, M, L, P]");
+    TORCH_CHECK(value.scalar_type() == torch::kFloat32 || value.scalar_type() == torch::kFloat16,
+                "ms_deform_attn_forward supports float32 and float16");
+    TORCH_CHECK(sampling_locations.scalar_type() == value.scalar_type() &&
+                    attention_weights.scalar_type() == value.scalar_type(),
+                "value, sampling_locations, and attention_weights must share dtype");
+    TORCH_CHECK(sampling_locations.device() == value.device() &&
+                    attention_weights.device() == value.device(),
+                "all MSDeformAttn tensors must be on the same device");
+
+    TORCH_CHECK(spatial_shapes.scalar_type() == torch::kInt64,
+                "spatial_shapes must be int64");
+    TORCH_CHECK(spatial_shapes.device() == value.device(),
+                "spatial_shapes must be on the value device");
+    TORCH_CHECK(value.is_contiguous() && sampling_locations.is_contiguous() &&
+                    attention_weights.is_contiguous() && spatial_shapes.is_contiguous(),
+                "ms_deform_attn_forward inputs must be contiguous");
+
+    const int batch = static_cast<int>(value.size(0));
+    const int value_len = static_cast<int>(value.size(1));
+    const int heads = static_cast<int>(value.size(2));
+    const int head_dim = static_cast<int>(value.size(3));
+    const int queries = static_cast<int>(sampling_locations.size(1));
+    const int levels = static_cast<int>(sampling_locations.size(3));
+    const int points = static_cast<int>(sampling_locations.size(4));
+    TORCH_CHECK(sampling_locations.size(0) == batch && sampling_locations.size(2) == heads,
+                "sampling_locations batch/head dimensions do not match value");
+    TORCH_CHECK(sampling_locations.size(3) == spatial_shapes.size(0),
+                "sampling_locations level dimension does not match spatial_shapes");
+    TORCH_CHECK(attention_weights.sizes() ==
+                    torch::IntArrayRef({batch, queries, heads, levels, points}),
+                "attention_weights shape does not match sampling_locations");
+
+    auto output = torch::empty({batch, queries, heads, head_dim}, value.options());
+    tecoopsHandle_t handle = getGlobalHandle();
+    const auto dtype = value.scalar_type() == torch::kFloat16
+                           ? TECOOPS_DATA_HALF : TECOOPS_DATA_FLOAT;
+    tecoopsMsDeformAttnForward(
+        handle, value.data_ptr(), spatial_shapes.data_ptr<int64_t>(), sampling_locations.data_ptr(),
+        attention_weights.data_ptr(), output.data_ptr(), batch, value_len, heads, head_dim,
+        queries, levels, points, dtype, TECOOPS_ALGO_0);
+    return output.view({batch, queries, heads * head_dim});
+}
+
 PYBIND11_MODULE(_torch_ext, m) {
     m.def("flatten_rays", &flatten_rays_torch, "flatten_rays (SDAA)");
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
@@ -212,4 +267,6 @@ PYBIND11_MODULE(_torch_ext, m) {
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
     m.def("flash_attn_varlen_func", &flash_attn_varlen_func_torch, "flash_attn_varlen_func (SDAA)");
     m.def("causal_conv1d_fn_torch", &causal_conv1d_fn_torch, "causal_conv1d_fn_torch (SDAA)");
+    m.def("ms_deform_attn_forward", &ms_deform_attn_forward_torch,
+          "ms_deform_attn_forward (SDAA inference)");
 }

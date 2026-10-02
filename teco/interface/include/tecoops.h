@@ -187,6 +187,23 @@ tecoopsStatus_t tecoopsCausalConv1d(tecoopsHandle_t handle,
                                     const int *convStateIndices,
                                     const int8_t *hasInitialState);
 
+tecoopsStatus_t tecoopsMsDeformAttnForward(
+    tecoopsHandle_t handle,
+    const void *value,
+    const int64_t *spatial_shapes,
+    const void *sampling_locations,
+    const void *attention_weights,
+    void *output,
+    int batch,
+    int value_len,
+    int num_heads,
+    int head_dim,
+    int num_queries,
+    int num_levels,
+    int num_points,
+    tecoopsDataType_t data_type,
+    tecoopsAlgo_t algo);
+
 #ifdef __cplusplus
 }
 #endif

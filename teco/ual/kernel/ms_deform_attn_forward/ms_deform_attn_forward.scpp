@@ -1,0 +1,109 @@
+// BSD 3-Clause License
+// Copyright (c) 2024, Tecorigin Co., Ltd.
+
+#include "ual/kernel/ms_deform_attn_forward/ms_deform_attn_forward.h"
+
+#include <cmath>
+
+#include "teco_kernel_context.h"
+
+namespace {
+
+template <typename T>
+__device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
+    const int n = args.batch;
+    const int s = args.value_len;
+    const int m = args.num_heads;
+    const int d = args.head_dim;
+    const int lq = args.num_queries;
+    const int levels = args.num_levels;
+    const int points = args.num_points;
+    const int64_t *shapes = args.spatial_shapes;
+    const T *value = static_cast<const T *>(args.value);
+    const T *locations = static_cast<const T *>(args.sampling_locations);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    T *output = static_cast<T *>(args.output);
+
+    // One work item owns one (batch, query, head) vector.  Sampling
+    // coordinates and weights are shared by all D lanes; keeping the
+    // accumulation vector in SPM/registers avoids recomputing the 16-point
+    // geometry once per channel.
+    const size_t total = static_cast<size_t>(n) * lq * m;
+    const size_t per_spe = (total + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * per_spe;
+    const size_t end = (begin + per_spe < total) ? begin + per_spe : total;
+
+    for (size_t flat = begin; flat < end; ++flat) {
+        size_t t = flat;
+        const int head = static_cast<int>(t % m);
+        t /= m;
+        const int query = static_cast<int>(t % lq);
+        const int batch = static_cast<int>(t / lq);
+        float acc[128];
+        for (int dim = 0; dim < d; ++dim) acc[dim] = 0.0f;
+
+        int level_start = 0;
+        for (int level = 0; level < levels; ++level) {
+            const int h = shapes[level * 2];
+            const int w = shapes[level * 2 + 1];
+            const size_t loc_base =
+                (((((static_cast<size_t>(batch) * lq + query) * m + head) * levels + level)
+                    * points) * 2);
+            const size_t weight_base =
+                ((((static_cast<size_t>(batch) * lq + query) * m + head) * levels + level)
+                    * points);
+
+            for (int point = 0; point < points; ++point) {
+                const float sx = static_cast<float>(locations[loc_base + point * 2]);
+                const float sy = static_cast<float>(locations[loc_base + point * 2 + 1]);
+                const float x = sx * static_cast<float>(w) - 0.5f;
+                const float y = sy * static_cast<float>(h) - 0.5f;
+                const float x0f = floorf(x);
+                const float y0f = floorf(y);
+                const int x0 = static_cast<int>(x0f);
+                const int y0 = static_cast<int>(y0f);
+                const int x1 = x0 + 1;
+                const int y1 = y0 + 1;
+                const float wx1 = x - x0f;
+                const float wy1 = y - y0f;
+                const float wx0 = 1.0f - wx1;
+                const float wy0 = 1.0f - wy1;
+                const float aw = static_cast<float>(weights[weight_base + point]);
+
+                const size_t value_base =
+                    (static_cast<size_t>(batch) * s + level_start) * m * d;
+                const int xs[2] = {x0, x1};
+                const int ys[2] = {y0, y1};
+                const float wx[2] = {wx0, wx1};
+                const float wy[2] = {wy0, wy1};
+                for (int iy = 0; iy < 2; ++iy) {
+                    for (int ix = 0; ix < 2; ++ix) {
+                        if (xs[ix] >= 0 && xs[ix] < w && ys[iy] >= 0 && ys[iy] < h) {
+                            const size_t pixel = static_cast<size_t>(ys[iy]) * w + xs[ix];
+                            const size_t value_index = value_base + (pixel * m + head) * d;
+                            const float factor = wx[ix] * wy[iy] * aw;
+                            for (int dim = 0; dim < d; ++dim) {
+                                acc[dim] += static_cast<float>(value[value_index + dim]) * factor;
+                            }
+                        }
+                    }
+                }
+            }
+            level_start += h * w;
+        }
+        const size_t output_base = flat * d;
+        for (int dim = 0; dim < d; ++dim) {
+            output[output_base + dim] = static_cast<T>(acc[dim]);
+        }
+    }
+}
+
+}  // namespace
+
+__global__ void teco_slave_ms_deform_attn_forward_fp32(MsDeformAttnForwardArgs args) {
+    ms_deform_attn_forward_kernel<float>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_forward_fp16(MsDeformAttnForwardArgs args) {
+    ms_deform_attn_forward_kernel<half>(args);
+}
