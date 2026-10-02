@@ -45,6 +45,8 @@ typedef struct FlashAttentionArgs {
     int max_q_seq_len;
     int max_k_seq_len;
     int max_block_num;
+    // 0: q_seq_lens is already per-batch; 1: it is cumulative [batch + 1].
+    int q_seq_lens_are_cumulative;
     float softmax_scale;
     const int *q_seq_lens;
     const int *kv_seq_lens;

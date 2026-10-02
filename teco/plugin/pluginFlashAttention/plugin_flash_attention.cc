@@ -102,18 +102,19 @@ class PluginFlashAttentionImpl : public AbstractPluginOp {
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v_cache_shape);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, q_shape);
 
-    tecoopsFlashAttention(handle,
-                          static_cast<int>(max_seqlen_q),
-                          static_cast<int>(max_seqlen_k),
-                          static_cast<int>(max_block_num),
-                          static_cast<const int*>(cu_seqlens_q_dev),
-                          static_cast<const int*>(seqused_k_dev),
-                          blockTableDesc, static_cast<const void*>(block_table_dev),
-                          qDataDesc, static_cast<const void*>(q_dev),
-                          kCacheDesc, static_cast<const void*>(k_cache_dev),
-                          vCacheDesc, static_cast<const void*>(v_cache_dev),
-                          oDataDesc, out_dev,
-                          /*workspace=*/nullptr);
+    tecoopsFlashAttentionCuSeqlensQ(
+        handle,
+        static_cast<int>(max_seqlen_q),
+        static_cast<int>(max_seqlen_k),
+        static_cast<int>(max_block_num),
+        static_cast<const int*>(cu_seqlens_q_dev),
+        static_cast<const int*>(seqused_k_dev),
+        blockTableDesc, static_cast<const void*>(block_table_dev),
+        qDataDesc, static_cast<const void*>(q_dev),
+        kCacheDesc, static_cast<const void*>(k_cache_dev),
+        vCacheDesc, static_cast<const void*>(v_cache_dev),
+        oDataDesc, out_dev,
+        /*workspace=*/nullptr);
 
     tecoopsDestroyTensorDescriptor(blockTableDesc);
     tecoopsDestroyTensorDescriptor(qDataDesc);
@@ -142,7 +143,7 @@ PLUGIN_REGISTER_OP("plugin_flash_attention")
     .Desc("Block table: [batch_size, block_table_dim]")
     .Input("cu_seqlens_q")
     .Type("Tensor")
-    .Desc("Cumulative Q seq lens: [batch_size + 1]")
+    .Desc("Cumulative Q seq lens: [batch_size + 1]; converted on device")
     .Input("seqused_k")
     .Type("Tensor")
     .Desc("KV seq used per batch: [batch_size]")
