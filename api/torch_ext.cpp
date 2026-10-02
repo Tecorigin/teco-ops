@@ -125,10 +125,13 @@ void flash_attn_varlen_func_torch(
     }
     auto q_lens = q_lens_cpu.to("sdaa");
 
+    // The kernel writes every [total_q, num_heads, head_size] output element.
+    // Allocate without a device-wide clear so each call does not pay for a
+    // redundant full-output memset. The focused API test seeds a caller-
+    // provided output tensor with a sentinel and compares the complete result,
+    // so an incomplete kernel write remains observable.
     if (!out.defined()) {
-        out = torch::zeros_like(q);
-    } else {
-        out.zero_();
+        out = torch::empty_like(q);
     }
 
     tecoopsHandle_t handle = getGlobalHandle();
