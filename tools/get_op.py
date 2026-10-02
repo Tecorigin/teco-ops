@@ -59,5 +59,16 @@ else:
                 opname = basename.replace('test_', '').replace('.py', '')
                 ops.add(opname)
 
+            elif filename.startswith('teco/plugin/'):
+                # Plugin-only changes otherwise bypass the operator CI loop.
+                # Keep the mapping explicit: plugin_flash_attention.cc ->
+                # flash_attention, matching the existing test and AFFECT_OPS
+                # name used by the repository.
+                basename = os.path.basename(filename)
+                if basename.startswith('plugin_') and basename.endswith('.cc'):
+                    opname = basename[len('plugin_'):-len('.cc')]
+                    if opname and not is_common_file(opname):
+                        ops.add(opname)
+
     op_string = ";".join(sorted(ops))
     print(op_string)
