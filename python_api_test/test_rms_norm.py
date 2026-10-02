@@ -127,8 +127,32 @@ def test_rms_norm_add():
     return all_passed
 
 
+def test_rms_norm_non_default_stream():
+    """在非默认 SDAA stream 上调用，覆盖 binding 的 stream 亲和性。"""
+    if not hasattr(torch.sdaa, "Stream") or not hasattr(torch.sdaa, "stream"):
+        raise RuntimeError("torch.sdaa Stream API is required for stream-affinity coverage")
+
+    num_tokens, hidden_size, eps = 64, 1536, 1e-6
+    x_cpu = torch.randn(num_tokens, hidden_size, dtype=torch.half)
+    w_cpu = torch.randn(hidden_size, dtype=torch.half)
+    stream = torch.sdaa.Stream()
+    with torch.sdaa.stream(stream):
+        x = x_cpu.to("sdaa")
+        weight = w_cpu.to("sdaa")
+        out = torch.empty(num_tokens, hidden_size, dtype=torch.half, device="sdaa")
+        tecoops.rms_norm(x, weight, None, out, None, eps)
+    stream.synchronize()
+
+    out_ref = rms_norm_ref(x_cpu, w_cpu, eps)
+    max_err = (out.cpu().float() - out_ref.float()).abs().max().item()
+    passed = max_err < 5e-3
+    print(f"  non_default_stream max_error = {max_err:.6e}  {'PASSED' if passed else 'FAILED'}")
+    return passed
+
+
 if __name__ == "__main__":
     r1 = test_rms_norm()
     r2 = test_rms_norm_add()
+    r3 = test_rms_norm_non_default_stream()
     print()
-    print("ALL PASSED" if (r1 and r2) else "SOME FAILED")
+    print("ALL PASSED" if (r1 and r2 and r3) else "SOME FAILED")
