@@ -221,18 +221,21 @@ def test_chunked_prefill():
 
 def test_mixed_batch():
     """Mixed batch: cumulative q lengths must be converted per batch on device."""
-    print("  mixed batch (B=2, q=[2,1], kv=[4,3])...", end=" ")
-    B, H, KV, HS, BS = 2, 4, 2, 64, 2
+    # The current flash-attention kernel tiles K/V with BN=32.  Keep this
+    # ABI regression test on the supported cache block size so it exercises
+    # cumulative q metadata instead of an unrelated unsupported shape.
+    print("  mixed batch (B=2, q=[2,1], kv=[64,32])...", end=" ")
+    B, H, KV, HS, BS = 2, 4, 2, 64, 32
     q_lens = [2, 1]
-    kv_lens = [4, 3]
+    kv_lens = [64, 32]
     total_q = sum(q_lens)
-    num_blocks = 4
+    num_blocks = 3
     np.random.seed(45)
 
     q = np.random.randn(total_q, H, HS).astype(np.float16)
     kc = np.random.randn(num_blocks, KV, BS, HS).astype(np.float16)
     vc = np.random.randn(num_blocks, KV, BS, HS).astype(np.float16)
-    bt = np.array([[0, 1], [2, 3]], dtype=np.int32)
+    bt = np.array([[0, 1], [2, 0]], dtype=np.int32)
     cu = np.array([0, 2, 3], dtype=np.int32)
     sq = np.array(kv_lens, dtype=np.int32)
 
