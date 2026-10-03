@@ -82,8 +82,12 @@ def reference_paged_flash_attention(q, k_cache, v_cache, block_table,
         q_len = q_end - q_start
         k_len = int(seqused_k[b])
         num_blocks = (k_len + block_size - 1) // block_size
+        # The kernel repeats each KV head for a contiguous group of query
+        # heads (the same layout as repeat_interleave in the Python API
+        # reference), rather than interleaving KV heads by modulo.
+        num_kv_groups = num_heads // kv_heads
         for h in range(num_heads):
-            kv_h = h % kv_heads
+            kv_h = h // num_kv_groups
             keys = np.concatenate(
                 [k_cache[int(block_table[b, logical_block]), kv_h]
                  for logical_block in range(num_blocks)], axis=0)[:k_len]
