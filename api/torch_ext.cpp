@@ -251,6 +251,10 @@ torch::Tensor ms_deform_attn_forward_torch(
 
     auto output = torch::empty({batch, queries, heads, head_dim}, value.options());
     tecoopsHandle_t handle = getGlobalHandle();
+    TORCH_CHECK(
+        tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream(value.device().index())) ==
+            TECOOPS_STATUS_SUCCESS,
+        "failed to bind the current SDAA stream for ms_deform_attn_forward");
     const auto dtype = value.scalar_type() == torch::kFloat16
                            ? TECOOPS_DATA_HALF : TECOOPS_DATA_FLOAT;
     tecoopsMsDeformAttnForward(
