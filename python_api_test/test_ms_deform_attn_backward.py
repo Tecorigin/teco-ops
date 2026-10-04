@@ -265,13 +265,16 @@ def real_shapes(tecoops):
 
 
 def owned_extension():
-    root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root / "api"))
+    """Use the installed wheel, or an in-place build explicitly on PYTHONPATH.
+
+    Never prepend an unbuilt api/ tree over the package selected by the caller.
+    Keep the extension/core provenance checks relative to that selected package.
+    """
     tecoops = importlib.import_module("tecoops")
     extension = importlib.import_module("tecoops._torch_ext")
-    assert Path(tecoops.__file__).resolve() == root / "api/tecoops/__init__.py"
+    package_dir = Path(tecoops.__file__).resolve().parent
     ext_path = Path(extension.__file__).resolve()
-    assert ext_path.parent == root / "api/tecoops", f"unexpected extension: {ext_path}"
+    assert ext_path.parent == package_dir, f"unexpected extension: {ext_path}"
     cores = set()
     for line in Path("/proc/self/maps").read_text().splitlines():
         path = line.split()[-1]
@@ -279,7 +282,7 @@ def owned_extension():
             cores.add(Path(path).resolve())
     assert len(cores) == 1, f"expected one owned libteco_ops.so, found {cores}"
     core = next(iter(cores))
-    assert root in core.parents, f"unexpected loaded core: {core}"
+    assert core.parent == package_dir, f"unexpected loaded core: {core}"
     print(f"tecoops.__file__={tecoops.__file__}", flush=True)
     print(f"_torch_ext.__file__={extension.__file__}", flush=True)
     for label, path in (("extension", ext_path), ("core", core)):

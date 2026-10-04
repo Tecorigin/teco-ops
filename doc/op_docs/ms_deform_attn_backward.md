@@ -91,7 +91,11 @@ output = tecoops.ms_deform_attn(value, shapes, locations, weights)
 # CPU oracle 与 wrapper 合约
 /home/py312/bin/python python_api_test/test_ms_deform_attn_backward.py --cpu-only
 
-# SDAA micro cases 与 real shapes（需先构建项目本地扩展）
+# SDAA micro cases 与 real shapes（默认使用已安装的 wheel）
+# build_ext --inplace 开发流需显式选择完整本地包：
+# export PYTHONPATH="$PWD/api:${PYTHONPATH:-}"
+# 测试不会把尚未构建的 api/ 目录插到已安装 wheel 前面；
+# 包、_torch_ext 与唯一已加载 libteco_ops.so 必须来自同一包目录。
 /home/py312/bin/python python_api_test/test_ms_deform_attn_backward.py --real-shapes
 
 /home/py312/bin/python python_api_test/test_ms_deform_attn_backward_list.py
