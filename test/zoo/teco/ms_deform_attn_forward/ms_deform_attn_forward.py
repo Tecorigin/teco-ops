@@ -72,6 +72,8 @@ def test_ms_deform_attn_forward(param_path, input_lists, reuse_lists, output_lis
     params = read_prototxt(param_path)
     input_params = params["input"]
     output_params = params["output"]
+    if isinstance(output_params, dict):
+        output_params = [output_params]
     value = to_tensor(input_lists[0], input_params[0], device=device)
     spatial_shapes = to_tensor(input_lists[1], input_params[1], device=device)
     locations = to_tensor(input_lists[2], input_params[2], device=device)
