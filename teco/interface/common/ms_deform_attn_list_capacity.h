@@ -27,27 +27,26 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef ZOO_TECO_MS_DEFORM_ATTN_BACKWARD_H_
-#define ZOO_TECO_MS_DEFORM_ATTN_BACKWARD_H_
-#include "zoo/teco/executor.h"
+#ifndef TECOOPS_INTERFACE_COMMON_MS_DEFORM_ATTN_LIST_CAPACITY_H_
+#define TECOOPS_INTERFACE_COMMON_MS_DEFORM_ATTN_LIST_CAPACITY_H_
 
-namespace optest {
-class MsDeformAttnBackwardExecutor : public TecoExecutor {
- public:
-    ~MsDeformAttnBackwardExecutor() override;
-    void destroy() override;
-    void paramCheck();
-    void paramParse();
-    void paramGeneration();
-    void compute();
-    void cpuCompute();
-    int64_t getTheoryOps() override;
-    int64_t getTheoryIoSize() override;
- private:
-    void *list_workspace_ = nullptr;
-    int32_t *value_heads_ = nullptr, *value_next_ = nullptr;
-    float *node_wx_ = nullptr, *node_wy_ = nullptr;
-    int batch_, value_len_, heads_, dim_, queries_, levels_, points_;
-};
-}  // namespace optest
-#endif  // ZOO_TECO_MS_DEFORM_ATTN_BACKWARD_H_
+#include <cstdint>
+#include <initializer_list>
+#include <limits>
+
+namespace tecoops {
+// Check before every multiplication: neither intermediate arithmetic nor node IDs overflow.
+inline bool msdaListCount(std::initializer_list<int64_t> factors, int64_t *count) {
+    int64_t result = 1;
+    for (const int64_t factor : factors) {
+        if (factor <= 0 || result > std::numeric_limits<int32_t>::max() / factor) {
+            return false;
+        }
+        result *= factor;
+    }
+    *count = result;
+    return true;
+}
+}  // namespace tecoops
+
+#endif  // TECOOPS_INTERFACE_COMMON_MS_DEFORM_ATTN_LIST_CAPACITY_H_

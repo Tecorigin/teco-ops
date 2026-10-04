@@ -96,6 +96,63 @@ struct MsDeformAttnBackwardCastOp
     }
 };
 
+// List entry points are independent of the legacy atomic implementation.
+struct MsDeformAttnBackwardListInitOp
+    : public BaseOp<MsDeformAttnBackwardListInitOp, MsDeformAttnBackwardType> {
+    static const char *name() { return "ms_deform_attn_backward_list_init"; }
+    common::Status findImpl(const MsDeformAttnBackwardPatchArgs *) {
+        setInstance(teco_slave_ms_deform_attn_backward_list_init,
+                    "teco_slave_ms_deform_attn_backward_list_init");
+        return common::Status::SUCCESS;
+    }
+};
+
+static MsDeformAttnBackwardType::PImplType MsDeformAttnBackwardListProducerAlgos[] = {
+    teco_slave_ms_deform_attn_backward_list_producer_fp32,
+    teco_slave_ms_deform_attn_backward_list_producer_fp16,
+};
+static const char *MsDeformAttnBackwardListProducerDescriptions[] = {
+    "teco_slave_ms_deform_attn_backward_list_producer_fp32",
+    "teco_slave_ms_deform_attn_backward_list_producer_fp16",
+};
+struct MsDeformAttnBackwardListProducerOp
+    : public BaseOp<MsDeformAttnBackwardListProducerOp, MsDeformAttnBackwardType> {
+    static const char *name() { return "ms_deform_attn_backward_list_producer"; }
+    common::Status findImpl(const MsDeformAttnBackwardPatchArgs *args) {
+        const int index = findMsDeformAttnBackwardBranch(args);
+        if (index < 0) {
+            ERROR("ms_deform_attn_backward_list dtype is not supported!");
+            return common::Status::NOT_IMPLEMENTED;
+        }
+        setInstance(MsDeformAttnBackwardListProducerAlgos[index],
+                    MsDeformAttnBackwardListProducerDescriptions[index]);
+        return common::Status::SUCCESS;
+    }
+};
+
+static MsDeformAttnBackwardType::PImplType MsDeformAttnBackwardListReduceAlgos[] = {
+    teco_slave_ms_deform_attn_backward_list_reduce_fp32,
+    teco_slave_ms_deform_attn_backward_list_reduce_fp16,
+};
+static const char *MsDeformAttnBackwardListReduceDescriptions[] = {
+    "teco_slave_ms_deform_attn_backward_list_reduce_fp32",
+    "teco_slave_ms_deform_attn_backward_list_reduce_fp16",
+};
+struct MsDeformAttnBackwardListReduceOp
+    : public BaseOp<MsDeformAttnBackwardListReduceOp, MsDeformAttnBackwardType> {
+    static const char *name() { return "ms_deform_attn_backward_list_reduce"; }
+    common::Status findImpl(const MsDeformAttnBackwardPatchArgs *args) {
+        const int index = findMsDeformAttnBackwardBranch(args);
+        if (index < 0) {
+            ERROR("ms_deform_attn_backward_list dtype is not supported!");
+            return common::Status::NOT_IMPLEMENTED;
+        }
+        setInstance(MsDeformAttnBackwardListReduceAlgos[index],
+                    MsDeformAttnBackwardListReduceDescriptions[index]);
+        return common::Status::SUCCESS;
+    }
+};
+
 }  // namespace ops
 }  // namespace ual
 }  // namespace tecoops

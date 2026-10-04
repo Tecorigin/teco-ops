@@ -51,6 +51,11 @@ struct MsDeformAttnBackwardArgs {
     void *grad_value_fp16;
     void *grad_locations;
     void *grad_weights;
+    // Optional caller-owned List workspace; unused by the original atomic path.
+    int32_t *value_heads;
+    int32_t *value_next;
+    float *node_wx;
+    float *node_wy;
     int batch;
     int value_len;
     int num_heads;

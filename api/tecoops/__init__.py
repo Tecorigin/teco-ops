@@ -26,7 +26,7 @@ class _MSDeformAttn(torch.autograd.Function):
 
 
 def ms_deform_attn(value, spatial_shapes, sampling_locations, attention_weights):
-    """Differentiable SDAA MSDA. First order only; atomic accumulation is not deterministic.
+    """Differentiable SDAA MSDA. First order only; list traversal order is not deterministic.
 
     Inputs follow the raw forward contiguous layout and FP32/FP16 contract.
     spatial_shapes must contain positive H/W pairs summing to value.size(1).

@@ -34,6 +34,7 @@
 #include <torch_sdaa/sdaa_extension.h>
 
 #include "interface/include/tecoops.h"
+#include "interface/common/ms_deform_attn_list_capacity.h"
 
 static tecoopsHandle_t g_handle = nullptr;
 
@@ -309,22 +310,34 @@ std::vector<torch::Tensor> ms_deform_attn_backward_torch(
     torch::Tensor sampling_locations, torch::Tensor attention_weights,
     torch::Tensor grad_output) {
     check_msda_backward_inputs(value, spatial_shapes, sampling_locations, attention_weights, grad_output);
+    int64_t head_count = 0, node_count = 0;
+    TORCH_CHECK(tecoops::msdaListCount({value.size(0), value.size(1), value.size(2)}, &head_count) &&
+                    tecoops::msdaListCount({4, value.size(0), sampling_locations.size(1), value.size(2),
+                                           sampling_locations.size(3), sampling_locations.size(4)}, &node_count),
+                "MSDeformAttn list workspace counts must fit int32");
     const c10::DeviceGuard device_guard(value.device());
     auto handle = getGlobalHandle();
     TORCH_CHECK(tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream(value.device().index())) ==
                     TECOOPS_STATUS_SUCCESS, "failed to bind current SDAA backward stream");
-    // Native reset, atomics and subnormal-preserving FP16 conversion share the current stream.
+    // Workspaces are allocated and consumed on the current stream; tensors remain
+    // alive through submission and same-stream allocator reuse preserves ordering.
+    auto value_heads = torch::empty({head_count}, value.options().dtype(torch::kInt32));
+    auto value_next = torch::empty({node_count}, value.options().dtype(torch::kInt32));
+    auto node_wx = torch::empty({node_count}, value.options().dtype(torch::kFloat32));
+    auto node_wy = torch::empty({node_count}, value.options().dtype(torch::kFloat32));
     auto grad_value = torch::empty(value.sizes(), value.options().dtype(torch::kFloat32));
     auto value_gradient = value.scalar_type() == torch::kFloat16 ? torch::empty_like(value) : grad_value;
     auto grad_locations = torch::empty_like(sampling_locations);
     auto grad_weights = torch::empty_like(attention_weights);
     const auto dtype = value.scalar_type() == torch::kFloat16 ? TECOOPS_DATA_HALF : TECOOPS_DATA_FLOAT;
-    auto status = tecoopsMsDeformAttnBackward(
+    auto status = tecoopsMsDeformAttnBackwardList(
         handle, value.data_ptr(), spatial_shapes.data_ptr<int64_t>(),
         sampling_locations.data_ptr(), attention_weights.data_ptr(), grad_output.data_ptr(),
         grad_value.data_ptr<float>(),
         dtype == TECOOPS_DATA_HALF ? value_gradient.data_ptr() : nullptr,
         grad_locations.data_ptr(), grad_weights.data_ptr(),
+        value_heads.data_ptr<int32_t>(), value_next.data_ptr<int32_t>(),
+        node_wx.data_ptr<float>(), node_wy.data_ptr<float>(),
         static_cast<int>(value.size(0)), static_cast<int>(value.size(1)),
         static_cast<int>(value.size(2)), static_cast<int>(value.size(3)),
         static_cast<int>(sampling_locations.size(1)), static_cast<int>(sampling_locations.size(3)),

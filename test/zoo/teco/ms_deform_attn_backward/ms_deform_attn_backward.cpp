@@ -31,6 +31,8 @@
 #include "zoo/teco/ms_deform_attn_backward/ms_deform_attn_backward.h"
 #include "zoo/teco/convert.h"
 #include "interface/include/tecoops.h"
+#include "interface/common/ms_deform_attn_list_capacity.h"
+#include "device/device.h"
 
 namespace optest {
 void MsDeformAttnBackwardExecutor::paramCheck() {
@@ -78,16 +80,47 @@ void MsDeformAttnBackwardExecutor::paramParse() {
     ALLOG(INFO) << "MSDA backward DIFF1 max_error gate: " << criterion.max_error;
 }
 
+MsDeformAttnBackwardExecutor::~MsDeformAttnBackwardExecutor() {
+    if (list_workspace_) scdaFree(list_workspace_);
+}
+
+void MsDeformAttnBackwardExecutor::destroy() {
+    if (list_workspace_) {
+        void *allocation = list_workspace_;
+        list_workspace_ = nullptr;
+        value_heads_ = value_next_ = nullptr;
+        node_wx_ = node_wy_ = nullptr;
+        if (!scdaFree(allocation)) {
+            throw std::runtime_error("MSDA list workspace memory guard failed");
+        }
+    }
+}
+
 void MsDeformAttnBackwardExecutor::paramGeneration() {
-    // This FP32-only fixture uses framework-owned output[0] as the workspace.
-    // The native C API resets it before every backward invocation.
+    // FP32-only fixture: framework output[0] is the value gradient. ListReduce
+    // writes all elements, and the private list storage is reset by ListInit.
+    int64_t head_count = 0, node_count = 0;
+    if (!tecoops::msdaListCount({batch_, value_len_, heads_}, &head_count) ||
+        !tecoops::msdaListCount({4, batch_, queries_, heads_, levels_, points_}, &node_count)) {
+        throw std::invalid_argument("MSDA list workspace counts must fit int32");
+    }
+    const size_t head_bytes = static_cast<size_t>(head_count) * sizeof(int32_t);
+    const size_t node_bytes = static_cast<size_t>(node_count) * sizeof(int32_t);
+    scdaMalloc(&list_workspace_, head_bytes + 3 * node_bytes);
+    if (!list_workspace_) throw std::runtime_error("MSDA list workspace allocation failed");
+    auto *base = static_cast<unsigned char *>(list_workspace_);
+    value_heads_ = reinterpret_cast<int32_t *>(base);
+    value_next_ = reinterpret_cast<int32_t *>(base + head_bytes);
+    node_wx_ = reinterpret_cast<float *>(base + head_bytes + node_bytes);
+    node_wy_ = reinterpret_cast<float *>(base + head_bytes + 2 * node_bytes);
 }
 
 void MsDeformAttnBackwardExecutor::compute() {
-    const auto status = tecoopsMsDeformAttnBackward(
+    const auto status = tecoopsMsDeformAttnBackwardList(
         handle_, dev_input[0], static_cast<const int64_t *>(dev_input[1]),
         dev_input[2], dev_input[3], dev_input[4], static_cast<float *>(dev_output[0]), nullptr,
-        dev_output[1], dev_output[2], batch_, value_len_, heads_, dim_, queries_, levels_, points_,
+        dev_output[1], dev_output[2], value_heads_, value_next_, node_wx_, node_wy_,
+        batch_, value_len_, heads_, dim_, queries_, levels_, points_,
         convert::toTecoopsDataType(parser_->input(0)->dtype), TECOOPS_ALGO_0);
     if (status != TECOOPS_STATUS_SUCCESS) {
         throw std::runtime_error("MSDA backward native call failed");

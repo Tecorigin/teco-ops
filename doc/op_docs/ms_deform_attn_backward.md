@@ -1,29 +1,27 @@
 # MultiScaleDeformableAttention 反向
 
-`tecoops.ms_deform_attn_backward` 为 MultiScaleDeformableAttention 提供 SDAA 反向原语；`tecoops.ms_deform_attn` 将已有前向与该反向接入 PyTorch 的一阶 autograd。现有 `tecoopsMsDeformAttnForward` C ABI 保持不变，原始前向入口仍不自行注册 autograd。
+`tecoops.ms_deform_attn_backward` 提供 SDAA 反向原语。Python 入口固定调用 list 实现 `tecoopsMsDeformAttnBackwardList`；原有 atomic C ABI `tecoopsMsDeformAttnBackward` 保留，签名与行为不变。`tecoops.ms_deform_attn` 将已有前向与该反向接入 PyTorch eager 一阶 autograd。
 
-## 输入、输出与限制
-
-原始 Python API 的签名为：
+## 输入和返回值
 
 ```python
-grad_value, grad_sampling_locations, grad_attention_weights = (
-    tecoops.ms_deform_attn_backward(
-        value, spatial_shapes, sampling_locations, attention_weights, grad_output
-    )
+grad_value, grad_locations, grad_weights = tecoops.ms_deform_attn_backward(
+    value, spatial_shapes, sampling_locations, attention_weights, grad_output
 )
 ```
 
-张量布局与前向相同：`value [N,S,M,D]`、`spatial_shapes [L,2]`（int64）、`sampling_locations [N,Lq,M,L,P,2]`、`attention_weights [N,Lq,M,L,P]`；`grad_output` 为 `[N,Lq,M*D]`。返回三项梯度分别与 `value`、`sampling_locations` 和 `attention_weights` 同形。`spatial_shapes` 不求梯度。
+张量布局为 `value [N,S,H,D]`、`spatial_shapes [L,2]`（int64）、`sampling_locations [N,Q,H,L,P,2]`、`attention_weights [N,Q,H,L,P]` 和 `grad_output [N,Q,H*D]`。`H` 表示 head 数，`Q` 表示 query 数。三个返回梯度分别与 value、采样位置和注意力权重同形；`spatial_shapes` 无梯度。
 
-输入、`grad_output` 必须是同一 SDAA 设备上的连续张量，且统一为 FP32 或 FP16；`spatial_shapes` 必须是该设备上的连续 int64 张量。批次、空间长度、head 数、head_dim、query 数、level 数和 point 数须为正数；支持 `D <= 128`、`L <= 8`。调用方还须保证每个 `(H,W)` 为正数且所有 `H*W` 之和等于 `S`。API 不做 CPU fallback；传入 CPU 张量会被拒绝。
+输入与 `grad_output` 必须是同一 SDAA 设备上的连续张量，且 dtype 统一为 FP32 或 FP16；`spatial_shapes` 必须是该设备上的连续 int64 张量。各维度为正数，支持 `D <= 128`、`L <= 8`。调用方须保证每层空间形状的高宽均为正数，且所有高宽乘积之和等于 `S`。Python 绑定检查工作区计数可由 int32 索引；`N*S*H` 和 `4*N*Q*H*L*P` 均须不超过 `INT32_MAX`。该接口要求 SDAA 张量，不提供 CPU fallback。
 
-## C API 工作区
+反向遵循前向的双线性采样语义：zero padding、`align_corners=False`。采样位置梯度对应归一化坐标，x/y 分量分别乘以该 level 的宽度/高度；注意力权重梯度对传入的原始权重求导，算子不附加 softmax。
 
-C 入口声明在 [`teco/interface/include/tecoops.h`](../../teco/interface/include/tecoops.h)：
+## List C API 与工作区
+
+C 声明位于 [`teco/interface/include/tecoops.h`](../../teco/interface/include/tecoops.h)。新增 list 入口的完整签名为：
 
 ```c
-tecoopsStatus_t tecoopsMsDeformAttnBackward(
+tecoopsStatus_t tecoopsMsDeformAttnBackwardList(
     tecoopsHandle_t handle,
     const void *value,
     const int64_t *spatial_shapes,
@@ -34,20 +32,29 @@ tecoopsStatus_t tecoopsMsDeformAttnBackward(
     void *grad_value_fp16,
     void *grad_locations,
     void *grad_weights,
+    int32_t *value_heads, int32_t *value_next, float *node_wx, float *node_wy,
     int batch, int value_len, int num_heads, int head_dim,
     int num_queries, int num_levels, int num_points,
     tecoopsDataType_t data_type, tecoopsAlgo_t algo);
 ```
 
-`grad_value` 始终指向调用方分配的 FP32 设备缓冲区，大小至少为 `N*S*M*D` 个 float；API 会在同一 handle stream 上先将它清零，再累加 `dvalue`，因此调用前无需预清零。FP32 时该缓冲区就是返回的 value 梯度，`grad_value_fp16` 可传 `nullptr`。FP16 时必须额外提供半精度 `grad_value_fp16` 输出缓冲区；它必须与 FP32 workspace 不重叠。API 在同一 stream 上完成 FP32 累加后，再以 round-to-nearest-even 转为该输出。位置和权重梯度写入 `grad_locations`、`grad_weights`，其元素类型与输入相同。
+四个 list workspace 的容量为：
 
-反向按 batch/query/head 为位置与权重梯度分配唯一写入者；value 梯度由多个采样点通过 atomic 累加，因此其结果不保证确定性。坐标导数使用与前向一致的双线性采样语义：zero padding、`align_corners=False`；对归一化采样坐标的导数分别乘以宽度 `W` 和高度 `H`。权重导数是对传入的原始 `attention_weights` 求导，算子内部不附加 softmax。
+- `value_heads`: `int32[N*S*H]`
+- `value_next`: `int32[4*N*Q*H*L*P]`
+- `node_wx`、`node_wy`: 各为 `float[4*N*Q*H*L*P]`
 
-## 一阶 autograd 用法
+令 `heads=N*S*H`、`nodes=4*N*Q*H*L*P`，额外 list workspace 共需 `4*heads + 12*nodes` 字节。另需 `float grad_value[N,S,H,D]`；FP16 还需独立的半精度 `grad_value_fp16[N,S,H,D]`。FP32 时 `grad_value` 同时承载返回的 value 梯度，`grad_value_fp16` 可传 `nullptr`；FP16 时 value 梯度从单独的半精度输出读取。`grad_locations`、`grad_weights` 分别按输入形状和 dtype 分配。
 
-`tecoops.ms_deform_attn(value, spatial_shapes, sampling_locations, attention_weights)` 返回 `[N,Lq,M*D]`，可用于普通一阶反向传播。其 backward 返回 value、采样位置和注意力权重的梯度；`spatial_shapes` 无梯度。该包装器标记为 `once_differentiable`，不支持二阶梯度；value 的 atomic 累加也不保证确定性。
+List 调用在 handle 的 current stream 上按 Init → Produce → Reduce → HalfCast 排队；FP32 跳过最后的 cast。Init 会初始化链表头，调用方不需要预清零 workspace。Producer 只为有效采样 corner 发布链表节点；Reduce 负责写入全部 FP32 value 梯度，包括没有采样节点的位置。多个 producer 通过原子插入建立链表，Reduce 的累加顺序不固定，因此 value 梯度可能存在非确定性。位置和权重梯度由各自唯一 owner 写入。
 
-在仓库根目录、已有隔离构建产物可从 `api/` 加载时，用厂商 Python `/home/py312/bin/python` 运行下例；示例不安装或修改全局 Python 包：
+工作区及输出区域必须互不重叠，并保持有效直到 handle stream 完成；异步调用涉及的输入也须在该 stream 完成前保持有效。FP16 的 `grad_value_fp16` 必须与 FP32 `grad_value` workspace 分开。FP16 次正规输入按原始 half 位模式展开；value 梯度以 FP32 累加后转换为 half，转换保留次正规结果并采用 round-to-nearest-even。
+
+## Autograd 用法
+
+`tecoops.ms_deform_attn(value, spatial_shapes, sampling_locations, attention_weights)` 返回 `[N,Q,H*D]`。反向返回 value、采样位置和注意力权重的梯度，不返回 `spatial_shapes` 梯度。包装器使用 `once_differentiable`，支持 eager 一阶反向，不支持二阶梯度。当前没有 FakeTensor/meta 或 `torch.compile` 集成支持证据，不应视作这些模式已受支持。
+
+在仓库根目录、隔离构建产物可从 `api/` 加载时，可用厂商 Python `/home/py312/bin/python` 运行以下示例；无需全局安装扩展：
 
 ```python
 import sys
@@ -63,12 +70,12 @@ locations = torch.rand(2, 5, 2, 1, 3, 2, device=device, dtype=dtype)
 weights = torch.rand(2, 5, 2, 1, 3, device=device, dtype=dtype)
 grad_output = torch.randn(2, 5, 8, device=device, dtype=dtype)
 
-# 需要直接访问三个梯度时使用 raw API。
+# 直接读取三个梯度
 gv, gl, gw = tecoops.ms_deform_attn_backward(
     value, shapes, locations, weights, grad_output
 )
 
-# 训练图使用配对包装器；backward 调用同一 raw backward API。
+# 在 eager 训练图中使用配对包装器
 value.requires_grad_()
 locations.requires_grad_()
 weights.requires_grad_()
@@ -76,9 +83,28 @@ output = tecoops.ms_deform_attn(value, shapes, locations, weights)
 (output * grad_output).sum().backward()
 ```
 
-## 验证范围
+## 验证入口
 
-[`python_api_test/test_ms_deform_attn_backward.py`](../../python_api_test/test_ms_deform_attn_backward.py) 提供独立 CPU 梯度 oracle、有限差分、raw API 与 autograd 包装器对拍，以及边界、重叠采样、subnormal、FP16 RNE tie 和非默认 stream 覆盖。已通过的算子级设备对拍包括这些 micro cases，以及 `N=2, S=22223, M=8, D=32, L=4, P=4` 的 encoder `Lq=22223` 和 decoder `Lq=300`，FP32/FP16 均与 CPU 参考对拍。模型级随机权重训练验证及性能取舍见下文；预训练检测与官方任务精度尚未验证。
+[`python_api_test/test_ms_deform_attn_backward.py`](../../python_api_test/test_ms_deform_attn_backward.py) 包含 CPU 参考梯度、有限差分、raw API 与 autograd 对拍、输入拒绝检查、边界和 FP16 次正规/RNE 覆盖；`--real-shapes` 增加 encoder/decoder 尺寸覆盖。C++ 测例见 [`ms_deform_attn_backward.cpp`](../../test/zoo/teco/ms_deform_attn_backward/ms_deform_attn_backward.cpp)、其 CPU 参考 [`ms_deform_attn_backward.py`](../../test/zoo/teco/ms_deform_attn_backward/ms_deform_attn_backward.py) 和 [`case_0.prototxt`](../../test/zoo/teco/ms_deform_attn_backward/test_case/case_0.prototxt)。
+
+```bash
+# CPU oracle 与 wrapper 合约
+/home/py312/bin/python python_api_test/test_ms_deform_attn_backward.py --cpu-only
+
+# SDAA micro cases 与 real shapes（需先构建项目本地扩展）
+/home/py312/bin/python python_api_test/test_ms_deform_attn_backward.py --real-shapes
+
+/home/py312/bin/python python_api_test/test_ms_deform_attn_backward_list.py
+
+# C++ fixture（按项目说明配置 SDK/parser，并构建本地算子库与 test/build 后）
+export PYTHONPATH="$PWD/test/zoo/teco:$PWD/api:${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="$PWD/api/tecoops:/home/py312/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+cd test/build
+./demo --gid=0 --perf_repeat=1 --warm_repeat=1 \
+  --cases_dir=../zoo/teco/ms_deform_attn_backward/test_case
+```
 
 
-This first feature commit uses FP32 atomic value-gradient accumulation. Subsequent commits independently optimize value-gradient ownership and record reads. The wrapper is eager first-order only, with no FakeTensor/meta or torch.compile registration.
+## 当前消融范围
+
+此提交采用 CAS List value-gradient ownership。生产模型默认路径和任务精度不在此消融中更改；后续 producer 单机制提交给出最终模型对照。

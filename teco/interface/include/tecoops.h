@@ -222,6 +222,29 @@ tecoopsStatus_t tecoopsMsDeformAttnBackward(
     int num_queries, int num_levels, int num_points,
     tecoopsDataType_t data_type, tecoopsAlgo_t algo);
 
+// List workspaces: value_heads int32[N*S*H], value_next int32[4*N*Q*H*L*P],
+// node_wx/node_wy FP32[4*N*Q*H*L*P]; both counts must fit INT32_MAX.
+// All workspace/output regions must be distinct and nonoverlapping, and must
+// remain alive until the handle stream completes. No caller initialization is needed.
+// Reduce writes every FP32 grad_value element, including empty-list zeros. HALF
+// requires a separate grad_value_fp16 output; conversion preserves subnormals.
+// List accumulation order is not deterministic; first-order gradients only.
+tecoopsStatus_t tecoopsMsDeformAttnBackwardList(
+    tecoopsHandle_t handle,
+    const void *value,
+    const int64_t *spatial_shapes,
+    const void *sampling_locations,
+    const void *attention_weights,
+    const void *grad_output,
+    float *grad_value,
+    void *grad_value_fp16,
+    void *grad_locations,
+    void *grad_weights,
+    int32_t *value_heads, int32_t *value_next, float *node_wx, float *node_wy,
+    int batch, int value_len, int num_heads, int head_dim,
+    int num_queries, int num_levels, int num_points,
+    tecoopsDataType_t data_type, tecoopsAlgo_t algo);
+
 #ifdef __cplusplus
 }
 #endif

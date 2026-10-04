@@ -75,7 +75,7 @@ __device__ inline void store_scalar(half *ptr, size_t index, float value) {
     }
 }
 
-template <typename T>
+template <typename T, bool UseList = false>
 __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
     const T *value = static_cast<const T *>(args.value);
     const T *locations = static_cast<const T *>(args.sampling_locations);
@@ -139,15 +139,40 @@ __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
                                 : 0;
                         }
                     }
+                    if constexpr (UseList) {
+                        // Each sample/corner has one producer. Publish metadata
+                        // before its head; readers run only in the next launch.
+                        for (int iy = 0; iy < 2; ++iy) {
+                            for (int ix = 0; ix < 2; ++ix) {
+                                const int corner = iy * 2 + ix;
+                                if (valid[corner]) {
+                                    const int32_t node = static_cast<int32_t>(sample * 4 + corner);
+                                    const size_t bucket = index[corner] / dims;
+                                    args.node_wx[node] = wx[ix];
+                                    args.node_wy[node] = wy[iy];
+                                    int32_t expected = args.value_heads[bucket];
+                                    for (;;) {
+                                        args.value_next[node] = expected;
+                                        const int32_t previous = sdaa::atomic_cas(
+                                            args.value_heads + bucket, expected, node);
+                                        if (previous == expected) break;
+                                        expected = previous;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for (int dim = 0; dim < dims; ++dim) {
                         float v[4];
                         for (int iy = 0; iy < 2; ++iy) {
                             for (int ix = 0; ix < 2; ++ix) {
                                 const int corner = iy * 2 + ix;
                                 v[corner] = valid[corner] ? load_scalar(value, index[corner] + dim) : 0.0f;
-                                if (valid[corner]) {
-                                    sdaa::atomic_add(args.grad_value + index[corner] + dim,
-                                                     go[dim] * aw * wx[ix] * wy[iy]);
+                                if constexpr (!UseList) {
+                                    if (valid[corner]) {
+                                        sdaa::atomic_add(args.grad_value + index[corner] + dim,
+                                                         go[dim] * aw * wx[ix] * wy[iy]);
+                                    }
                                 }
                             }
                         }
@@ -163,6 +188,41 @@ __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
                 store_scalar(grad_weights, sample, grad_weight);
             }
             level_start += height * width;
+        }
+    }
+}
+
+template <typename T>
+__device__ void value_list_reduce(MsDeformAttnBackwardArgs args) {
+#pragma clang fp contract(off)
+    const T *grad_output = static_cast<const T *>(args.grad_output);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    const int dims = args.head_dim;
+    const size_t samples_per_owner = static_cast<size_t>(args.num_levels) * args.num_points;
+    const size_t owners = static_cast<size_t>(args.batch) * args.value_len * args.num_heads;
+    // Round-robin ownership distributes the small spatial levels across SPEs.
+    // This stage is the sole writer of every value pixel/head gradient.
+    for (size_t owner = static_cast<size_t>(threadIdx); owner < owners; owner += args.spe_num) {
+        float sum[128];
+        for (int dim = 0; dim < dims; ++dim) sum[dim] = 0.0f;
+        int32_t node = args.value_heads[owner];
+        while (node != -1) {
+            const size_t sample = static_cast<size_t>(node) / 4;
+            const size_t go_owner = sample / samples_per_owner;
+            const float aw = load_scalar(weights, sample);
+            const float wx = args.node_wx[node];
+            const float wy = args.node_wy[node];
+            for (int dim = 0; dim < dims; ++dim) {
+                const float go = load_scalar(grad_output, go_owner * dims + dim);
+                // Preserve the atomic path's multiplication order and round
+                // before adding. Volatile also prevents link-time contraction.
+                volatile float contribution = ((go * aw) * wx) * wy;
+                sum[dim] += contribution;
+            }
+            node = args.value_next[node];
+        }
+        for (int dim = 0; dim < dims; ++dim) {
+            args.grad_value[owner * dims + dim] = sum[dim];
         }
     }
 }
@@ -200,4 +260,29 @@ __global__ void teco_slave_ms_deform_attn_backward_cast_fp16(MsDeformAttnBackwar
     for (size_t index = begin; index < end; ++index) {
         store_scalar(output, index, args.grad_value[index]);
     }
+}
+
+// Initialization, publication and reduction are separate current-stream
+// launches. The consumer therefore cannot observe incomplete node metadata.
+__global__ void teco_slave_ms_deform_attn_backward_list_init(MsDeformAttnBackwardArgs args) {
+    const size_t owners = static_cast<size_t>(args.batch) * args.value_len * args.num_heads;
+    for (size_t owner = static_cast<size_t>(threadIdx); owner < owners; owner += args.spe_num) {
+        args.value_heads[owner] = -1;
+    }
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_producer_fp32(MsDeformAttnBackwardArgs args) {
+    bilinear_backward<float, true>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_producer_fp16(MsDeformAttnBackwardArgs args) {
+    bilinear_backward<half, true>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_reduce_fp32(MsDeformAttnBackwardArgs args) {
+    value_list_reduce<float>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_reduce_fp16(MsDeformAttnBackwardArgs args) {
+    value_list_reduce<half>(args);
 }
