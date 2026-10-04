@@ -204,6 +204,24 @@ tecoopsStatus_t tecoopsMsDeformAttnForward(
     tecoopsDataType_t data_type,
     tecoopsAlgo_t algo);
 
+// grad_value is an FP32 device workspace for both input dtypes; this API resets it.
+// HALF requires a distinct, nonoverlapping grad_value_fp16 output; FLOAT may pass nullptr.
+// Native reset, accumulation and subnormal-preserving conversion use the same handle stream.
+tecoopsStatus_t tecoopsMsDeformAttnBackward(
+    tecoopsHandle_t handle,
+    const void *value,
+    const int64_t *spatial_shapes,
+    const void *sampling_locations,
+    const void *attention_weights,
+    const void *grad_output,
+    float *grad_value,
+    void *grad_value_fp16,
+    void *grad_locations,
+    void *grad_weights,
+    int batch, int value_len, int num_heads, int head_dim,
+    int num_queries, int num_levels, int num_points,
+    tecoopsDataType_t data_type, tecoopsAlgo_t algo);
+
 #ifdef __cplusplus
 }
 #endif

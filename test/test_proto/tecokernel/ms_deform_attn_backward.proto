@@ -1,0 +1,5 @@
+syntax = "proto2";
+package testpt;
+
+// No host tuning parameters; gradients are represented by three output tensors.
+message MsDeformAttnBackwardParam {}
