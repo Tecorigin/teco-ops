@@ -46,7 +46,7 @@ tecoopsStatus_t tecoopsMsDeformAttnBackwardList(
 
 令 `heads=N*S*H`、`nodes=4*N*Q*H*L*P`，额外 list workspace 共需 `4*heads + 12*nodes` 字节。另需 `float grad_value[N,S,H,D]`；FP16 还需独立的半精度 `grad_value_fp16[N,S,H,D]`。FP32 时 `grad_value` 同时承载返回的 value 梯度，`grad_value_fp16` 可传 `nullptr`；FP16 时 value 梯度从单独的半精度输出读取。`grad_locations`、`grad_weights` 分别按输入形状和 dtype 分配。
 
-List 调用在 handle 的 current stream 上按 Init → Produce → Reduce → HalfCast 排队；FP32 跳过最后的 cast。Init 会初始化链表头，调用方不需要预清零 workspace。Producer 只为有效采样 corner 发布链表节点；Reduce 负责写入全部 FP32 value 梯度，包括没有采样节点的位置。多个 producer 通过原子插入建立链表，Reduce 的累加顺序不固定，因此 value 梯度可能存在非确定性。位置和权重梯度由各自唯一 owner 写入。
+List 调用在 handle 的 current stream 上按 Init → Produce → Reduce → HalfCast 排队；FP32 跳过最后的 cast。Init 会初始化链表头，调用方不需要预清零 workspace。Producer 只为有效采样 corner 复制 `D * sizeof(dtype)` 字节，并发布链表节点；Reduce 负责写入全部 FP32 value 梯度，包括没有采样节点的位置。多个 producer 通过原子插入建立链表，Reduce 的累加顺序不固定，因此 value 梯度可能存在非确定性。位置和权重梯度由各自唯一 owner 写入。
 
 工作区及输出区域必须互不重叠，并保持有效直到 handle stream 完成；异步调用涉及的输入也须在该 stream 完成前保持有效。FP16 的 `grad_value_fp16` 必须与 FP32 `grad_value` workspace 分开。FP16 次正规输入按原始 half 位模式展开；value 梯度以 FP32 累加后转换为 half，转换保留次正规结果并采用 round-to-nearest-even。
 
@@ -95,8 +95,10 @@ output = tecoops.ms_deform_attn(value, shapes, locations, weights)
 /home/py312/bin/python python_api_test/test_ms_deform_attn_backward.py --real-shapes
 
 /home/py312/bin/python python_api_test/test_ms_deform_attn_backward_list.py
+/home/py312/bin/python python_api_test/test_ms_deform_attn_backward_offsets.py
 
 # C++ fixture（按项目说明配置 SDK/parser，并构建本地算子库与 test/build 后）
+export PATH=/home/py312/bin:$PATH
 export PYTHONPATH="$PWD/test/zoo/teco:$PWD/api:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$PWD/api/tecoops:/home/py312/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
 cd test/build
@@ -104,7 +106,18 @@ cd test/build
   --cases_dir=../zoo/teco/ms_deform_attn_backward/test_case
 ```
 
+另有 [test_ms_deform_attn_backward_list.py](../../python_api_test/test_ms_deform_attn_backward_list.py) 的长链/空链验证，以及 [test_ms_deform_attn_backward_offsets.py](../../python_api_test/test_ms_deform_attn_backward_offsets.py) 的 36 组双输入 offset=1 位级验证。
 
-## 当前消融范围
+## 随机官方模型结果
 
-此提交采用 CAS List value-gradient ownership。Consumer 每 node 的 grad-output 向量已使用精确长度 blocking SPM record。生产模型默认路径和任务精度不在此消融中更改；后续 producer 单机制提交给出最终模型对照。
+<!-- FINAL_MODEL_RESULT -->
+固定 seed=1234 的官方 6 层 encoder / 6 层 decoder 随机权重 DeformableTransformer，FP32、N=2、S=22223、H=8、D=32、decoder Q=300；loss probes 固定 seed=20261004。预热一次后连续计时三次，输入、权重及 loss 相同，CPU oracle 与复制检查不计入计时。
+
+| 完整 forward + backward | 三次原值（秒） | 中位数（秒） | 峰值 allocated（MiB） |
+|---|---|---|---|
+| SDAA grid 基线 | 22.829681091 / 22.595644849 / 21.796284871 | 22.595644849 | 9696.833984 |
+| 本 PR forward + List backward + consumer/producer DMA | 16.696383636 / 16.695467289 / 16.708399124 | 16.696383636 | 3944.024414 |
+
+中位训练耗时下降 26.108%，峰值 allocated 约下降 59.3%。该结果属于组合路径，不能单独归因 CAS 或某一项 DMA。307.558 秒内共 18 轮（216 次前向和 216 次反向原语调用），每轮均检查 3 项输出和全部 236 个参数/输入梯度；输出 atol/rtol=2e-4，梯度 atol=2e-5、rtol=1e-3。独立 smoke 中最大输出误差 2.324581e-6、最大梯度误差 1.800777e-5，重复前向位级一致，SGD 更新 230 个参数。真实 encoder/decoder FP32/FP16 原语对拍、C++ 实际 DIFF1 门限 5e-5、长链/空链、默认/非默认 stream 和 36 组 value+grad_output offset=1 的严格位级回归均通过。
+
+上述测试使用随机权重与合成 loss；预训练检测 checkpoint 和官方任务精度未验证，生产模型默认 grid 不在本 PR 中修改。当前证据不支持 FP16 完整模型性能或任务准确率声明。

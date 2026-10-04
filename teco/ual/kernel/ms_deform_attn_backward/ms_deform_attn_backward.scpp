@@ -76,6 +76,15 @@ __device__ inline void store_scalar(half *ptr, size_t index, float value) {
     }
 }
 
+// The legacy atomic specialization has no corner-record allocation.
+template <typename T, bool Enabled>
+struct CornerRecords {};
+
+template <typename T>
+struct CornerRecords<T, true> {
+    T rows[4][128] __attribute__((aligned(64)));
+};
+
 template <typename T, bool UseList = false>
 __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
     const T *value = static_cast<const T *>(args.value);
@@ -93,6 +102,7 @@ __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
     const size_t work = (total + args.spe_num - 1) / args.spe_num;
     const size_t begin = static_cast<size_t>(threadIdx) * work;
     const size_t end = (begin + work < total) ? begin + work : total;
+    CornerRecords<T, UseList> corner_records;
 
     for (size_t owner = begin; owner < end; ++owner) {
         const int head = static_cast<int>(owner % heads);
@@ -163,12 +173,26 @@ __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
                             }
                         }
                     }
+                    if constexpr (UseList) {
+                        // Keep all four records alive for the original dim-major math.
+                        for (int corner = 0; corner < 4; ++corner) {
+                            if (valid[corner]) {
+                                ::memcpy(corner_records.rows[corner], value + index[corner],
+                                         dims * sizeof(T));
+                            }
+                        }
+                    }
                     for (int dim = 0; dim < dims; ++dim) {
                         float v[4];
                         for (int iy = 0; iy < 2; ++iy) {
                             for (int ix = 0; ix < 2; ++ix) {
                                 const int corner = iy * 2 + ix;
-                                v[corner] = valid[corner] ? load_scalar(value, index[corner] + dim) : 0.0f;
+                                if constexpr (UseList) {
+                                    v[corner] = valid[corner]
+                                        ? load_scalar(corner_records.rows[corner], dim) : 0.0f;
+                                } else {
+                                    v[corner] = valid[corner] ? load_scalar(value, index[corner] + dim) : 0.0f;
+                                }
                                 if constexpr (!UseList) {
                                     if (valid[corner]) {
                                         sdaa::atomic_add(args.grad_value + index[corner] + dim,
