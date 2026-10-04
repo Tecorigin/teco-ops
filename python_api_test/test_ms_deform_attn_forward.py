@@ -170,6 +170,23 @@ def check_subnormal_coordinates(dtype):
     return error < limit
 
 
+def check_rejected_parameters():
+    for dim, levels in [(129, 1), (4, 9)]:
+        shapes = torch.ones((levels, 2), dtype=torch.int64, device="sdaa")
+        value = torch.ones((1, levels, 1, dim), device="sdaa")
+        locations = torch.full((1, 1, 1, levels, 1, 2), 0.5, device="sdaa")
+        weights = torch.ones((1, 1, 1, levels, 1), device="sdaa")
+        try:
+            tecoops.ms_deform_attn_forward(value, shapes, locations, weights)
+        except RuntimeError as error:
+            if "rejected parameters" not in str(error):
+                raise
+        else:
+            raise AssertionError(f"unsupported dim={dim}, levels={levels} returned an output")
+    print("C API rejected-parameter propagation PASSED")
+    return True
+
+
 if __name__ == "__main__":
     results = [
         check(torch.float32),
@@ -192,6 +209,7 @@ if __name__ == "__main__":
         ),
         check_subnormal_coordinates(torch.float32),
         check_subnormal_coordinates(torch.float16),
+        check_rejected_parameters(),
     ]
     passed = all(results)
     print("ALL PASSED" if passed else "SOME FAILED")

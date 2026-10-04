@@ -18,7 +18,8 @@ FP16 输入中的 subnormal 通过原始位模式显式展开为 FP32：符号 �
 回归包含宽度 167 的正、负极小坐标、零与最小 normal 值，误差门限不变。
 
 该接口是前向推理原语，不注册 autograd 反向实现。Deformable-DETR 训练适配继续使用
-模型仓库中的可微 `grid_sample` 兼容路径。输入必须位于同一 SDAA 设备并且连续，
+模型仓库中的可微 `grid_sample` 兼容路径。当前支持 1–128 的 head_dim 和 1–8 个 level；非法参数的 C API 状态由 Python 绑定抛出异常。
+输入必须位于同一 SDAA 设备并且连续，
 `spatial_shapes` 必须是设备上的 `int64` 张量；调用方应在进入热路径前准备好这些布局。
 
 ```python

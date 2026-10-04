@@ -257,10 +257,13 @@ torch::Tensor ms_deform_attn_forward_torch(
         "failed to bind the current SDAA stream for ms_deform_attn_forward");
     const auto dtype = value.scalar_type() == torch::kFloat16
                            ? TECOOPS_DATA_HALF : TECOOPS_DATA_FLOAT;
-    tecoopsMsDeformAttnForward(
+    const auto status = tecoopsMsDeformAttnForward(
         handle, value.data_ptr(), spatial_shapes.data_ptr<int64_t>(), sampling_locations.data_ptr(),
         attention_weights.data_ptr(), output.data_ptr(), batch, value_len, heads, head_dim,
         queries, levels, points, dtype, TECOOPS_ALGO_0);
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "ms_deform_attn_forward rejected parameters (status ",
+                static_cast<int>(status), ")");
     return output.view({batch, queries, heads * head_dim});
 }
 
