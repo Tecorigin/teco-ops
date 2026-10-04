@@ -107,4 +107,4 @@ cd test/build
 
 ## 当前消融范围
 
-此提交采用 CAS List value-gradient ownership。生产模型默认路径和任务精度不在此消融中更改；后续 producer 单机制提交给出最终模型对照。
+此提交采用 CAS List value-gradient ownership。Consumer 每 node 的 grad-output 向量已使用精确长度 blocking SPM record。生产模型默认路径和任务精度不在此消融中更改；后续 producer 单机制提交给出最终模型对照。

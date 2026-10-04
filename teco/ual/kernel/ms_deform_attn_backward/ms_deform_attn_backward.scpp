@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstdint>
 #include "sdaa_atomic.h"
+#include <sdaa_memcpy.h>
 #include "teco_kernel_context.h"
 
 namespace {
@@ -200,6 +201,7 @@ __device__ void value_list_reduce(MsDeformAttnBackwardArgs args) {
     const int dims = args.head_dim;
     const size_t samples_per_owner = static_cast<size_t>(args.num_levels) * args.num_points;
     const size_t owners = static_cast<size_t>(args.batch) * args.value_len * args.num_heads;
+    T go_record[128] __attribute__((aligned(64)));
     // Round-robin ownership distributes the small spatial levels across SPEs.
     // This stage is the sole writer of every value pixel/head gradient.
     for (size_t owner = static_cast<size_t>(threadIdx); owner < owners; owner += args.spe_num) {
@@ -209,11 +211,13 @@ __device__ void value_list_reduce(MsDeformAttnBackwardArgs args) {
         while (node != -1) {
             const size_t sample = static_cast<size_t>(node) / 4;
             const size_t go_owner = sample / samples_per_owner;
+            ::memcpy(go_record, grad_output + go_owner * dims,
+                     static_cast<size_t>(dims) * sizeof(T));
             const float aw = load_scalar(weights, sample);
             const float wx = args.node_wx[node];
             const float wy = args.node_wy[node];
             for (int dim = 0; dim < dims; ++dim) {
-                const float go = load_scalar(grad_output, go_owner * dims + dim);
+                const float go = load_scalar(go_record, dim);
                 // Preserve the atomic path's multiplication order and round
                 // before adding. Volatile also prevents link-time contraction.
                 volatile float contribution = ((go * aw) * wx) * wy;
