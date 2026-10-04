@@ -31,6 +31,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <sdaa_memcpy.h>
 
 #include "teco_kernel_context.h"
 
@@ -76,6 +77,8 @@ __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
     const size_t begin = static_cast<size_t>(threadIdx) * per_spe;
     const size_t end = (begin + per_spe < total) ? begin + per_spe : total;
 
+    // One blocking value record per SPE; consumed before its next overwrite.
+    T value_record[128] __attribute__((aligned(64)));
     for (size_t flat = begin; flat < end; ++flat) {
         size_t t = flat;
         const int head = static_cast<int>(t % m);
@@ -124,9 +127,10 @@ __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
                         if (xs[ix] >= 0 && xs[ix] < w && ys[iy] >= 0 && ys[iy] < h) {
                             const size_t pixel = static_cast<size_t>(ys[iy]) * w + xs[ix];
                             const size_t value_index = value_base + (pixel * m + head) * d;
+                            ::memcpy(value_record, value + value_index, d * sizeof(T));
                             const float factor = wx[ix] * wy[iy] * aw;
                             for (int dim = 0; dim < d; ++dim) {
-                                acc[dim] += read_as_float(value, value_index + dim) * factor;
+                                acc[dim] += read_as_float(value_record, dim) * factor;
                             }
                         }
                     }

@@ -56,6 +56,7 @@ def check(
     heads=2,
     dim=3,
     use_non_default_stream=False,
+    storage_offset=0,
 ):
     device = torch.device("sdaa")
     levels, points = 2, 2
@@ -103,6 +104,11 @@ def check(
         # Queue device-side producers before the extension call. In the stream
         # case, the call must observe these writes on the same non-default stream.
         value = value.mul(1.25).add(0.25).contiguous()
+        if storage_offset:
+            packed = torch.empty(value.numel() + storage_offset, dtype=dtype, device=device)
+            packed[storage_offset:].copy_(value.reshape(-1))
+            value = packed[storage_offset:].reshape(value.shape)
+            assert value.is_contiguous() and value.storage_offset() == storage_offset
         locations = locations_cpu.to(device=device)
         locations = locations.mul(0.75).add(0.125).contiguous()
         weights = weights_cpu.to(device=device)
@@ -170,6 +176,27 @@ def check_subnormal_coordinates(dtype):
     return error < limit
 
 
+def check_subnormal_values():
+    dtype = torch.float16
+    shapes_cpu = torch.tensor([[2, 3]], dtype=torch.int64)
+    value_cpu = (torch.arange(2 * 6 * 3 * 3).reshape(2, 6, 3, 3).remainder(17) - 8)
+    value_cpu = (value_cpu.float() * 2.0**-24).to(dtype)
+    locations_cpu = torch.full((2, 3, 3, 1, 2, 2), 0.375, dtype=dtype)
+    weights_cpu = torch.full((2, 3, 3, 1, 2), 32768.0, dtype=dtype)
+    stream = torch.sdaa.Stream()
+    with torch.sdaa.stream(stream):
+        packed = torch.cat((torch.zeros(1, dtype=dtype), value_cpu.flatten())).to("sdaa")
+        value = packed[1:].reshape(value_cpu.shape)
+        output = tecoops.ms_deform_attn_forward(
+            value, shapes_cpu.to("sdaa"), locations_cpu.to("sdaa"), weights_cpu.to("sdaa")
+        )
+    stream.synchronize()
+    expected = reference(value_cpu.float(), shapes_cpu, locations_cpu.float(), weights_cpu.float())
+    error = (output.cpu().float() - expected).abs().max().item()
+    print(f"FP16 amplified signed-subnormal values, offset1 max_error={error:.6e}")
+    return error < 2e-3
+
+
 def check_rejected_parameters():
     for dim, levels in [(129, 1), (4, 9)]:
         shapes = torch.ones((levels, 2), dtype=torch.int64, device="sdaa")
@@ -211,6 +238,11 @@ if __name__ == "__main__":
         check_subnormal_coordinates(torch.float16),
         check_rejected_parameters(),
     ]
+    for dtype in (torch.float32, torch.float16):
+        for dim in (1, 3, 31, 32, 128):
+            results.append(check(dtype, batch=2, heads=3, dim=dim,
+                                 use_non_default_stream=dim in (3, 31), storage_offset=1))
+    results.append(check_subnormal_values())
     passed = all(results)
     print("ALL PASSED" if passed else "SOME FAILED")
     raise SystemExit(0 if passed else 1)

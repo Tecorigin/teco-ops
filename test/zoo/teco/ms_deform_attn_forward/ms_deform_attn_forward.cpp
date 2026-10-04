@@ -52,6 +52,17 @@ void MsDeformAttnForwardExecutor::paramParse() {
     num_queries_ = locations->shape[1];
     num_levels_ = locations->shape[3];
     num_points_ = locations->shape[4];
+    // DIFF1 uses max_error; honor this fixture's declared threshold.
+    const auto parsed = parser_->criterions();
+    if (parsed.size() != 1 || parsed.begin()->formula != DIFF1 ||
+        parsed.begin()->error_threshold <= 0) {
+        throw std::invalid_argument("MSDA forward fixture requires one positive DIFF1 threshold");
+    }
+    auto criterion = *parsed.begin();
+    criterion.max_error = criterion.error_threshold;
+    criterions_.clear();
+    criterions_.insert(criterion);
+    ALLOG(INFO) << "MSDA forward DIFF1 max_error gate: " << criterion.max_error;
 }
 
 void MsDeformAttnForwardExecutor::paramGeneration() {
