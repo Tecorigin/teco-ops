@@ -10,7 +10,7 @@ O = Softmax(Q @ K^T * scale) @ V
 
 **分块策略：**
 
-- Q 分块大小默认 `BM = 128`，head_size=256 时使用独立 `BM = 64` 入口；K/V 分块大小 `BN = 32`
+- Q 分块大小默认 `BM = 128`，head_size=256/512 时分别使用独立 `BM = 64/32` 入口；K/V 分块大小 `BN = 32`
 - 对于每个 Q block，依次加载所有的 KV block 进行分块计算
 - 每个 KV block 的中间结果通过 **online softmax** 累积到 float 累加器中
 
@@ -142,7 +142,7 @@ tecoopsFlashAttention参数信息
 
 **1. 数据分块 (Tiling)**
 
-- Q 默认按 `BM=128` 分块，D256 按 `BM=64` 分块；K/V 按 `BN=32` 分块
+- Q 默认按 `BM=128` 分块，D256/D512 分别按 `BM=64/32` 分块；K/V 按 `BN=32` 分块
 - 每块独立加载到 SPM，减少 HBM 访问
 - 每个 Q block 遍历所有 KV block 后一次性写出结果
 
@@ -173,10 +173,11 @@ tecoopsFlashAttention参数信息
 | ------------------ | ----------------------------------- | ----------------------------------- |
 | `TECOOPS_ALGO_0` | `teco_slave_flash_attention_half` | 基础实现，half 精度，单 SPE 单 head |
 | `TECOOPS_ALGO_1` | `teco_slave_flash_attention_half_d256` | head_size=256 的 BM64 编译期特化 |
+| `TECOOPS_ALGO_2` | `teco_slave_flash_attention_half_d512` | head_size=512 的 BM32 编译期特化 |
 
-### D256 SPM 预算与范围
+### D256/D512 SPM 预算与范围
 
-外层分发仅在 `size_per_head == 256` 时选择 BM64 入口。两个入口共享同一模板实现，
+外层分发在 `size_per_head == 256/512` 时分别选择 BM64/BM32 入口。三个入口共享同一模板实现，
 BM 是编译期常量；D64/D128 保留 BM128，设备热路径不增加后端选择。
 HAL 的 `M128_N32` 接口允许 `M2 <= 128, N2 = 32`，两次 GEMM 的配置不变。
 
@@ -184,14 +185,15 @@ HAL 的 `M128_N32` 接口允许 `M2 <= 128, N2 = 32`，两次 GEMM 的配置不�
 
 `8*BM*D + 4*BN*D + 6*BM*BN + 20*BM + 4*block_table_dim`。
 
-| D256 分块 | 缓冲区字节数（另加 block table） | 说明 |
+| 维度与分块 | 缓冲区字节数（另加 block table） | 说明 |
 | --- | ---: | --- |
-| BM128 / BN32 | 322048 | 超过仓库 240512-byte SPM 上限；o_accum 单独需 131072 bytes |
-| BM64 / BN32 | 177408 | 距上限余 63104 bytes，需容纳 block table、分配对齐和运行时开销 |
+| D256 / BM128 / BN32 | 322048 | 超过仓库 240512-byte SPM 上限；o_accum 单独需 131072 bytes |
+| D256 / BM64 / BN32 | 177408 | 距上限余 63104 bytes，需容纳 block table、分配对齐和运行时开销 |
+| D512 / BM32 / BN32 | 203392 | 距上限余 37120 bytes，需容纳 block table、分配对齐和运行时开销 |
 
 该预算不包含栈和 HAL 运行时开销，实际正确性以设备测例为准。FP32 累加器、online
 softmax、GQA、右对齐 causal mask、KV cache 布局及 Python ABI 均保持原语义。
-此分支不扩展 D512 支持。当前 BN 固定为 block_size=32；Python 的 `window_size`
+D512 分支沿用通用 paged causal 计算，不代表模型已接入此分支。当前 BN 固定为 block_size=32；Python 的 `window_size`
 尚未传入底层 kernel，因此不支持 sliding-window mask，也不能据此声称 Gemma
 超过 1024 tokens 的 sliding attention 正确。本改动不声明性能提升。
 
@@ -220,7 +222,7 @@ test/
 │   ├── flash_attention.h
 │   ├── flash_attention.py                  # Python reference
 │   └── test_case/
-│       ├── 0.prototxt ~ 6.prototxt         # 测试用例
+│       ├── 0.prototxt ~ 7.prototxt         # 测试用例
 api/
 ├── torch_ext.cpp                           # PyTorch 扩展绑定
 └── tecoops/

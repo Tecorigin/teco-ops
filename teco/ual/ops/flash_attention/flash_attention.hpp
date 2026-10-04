@@ -53,6 +53,8 @@ static const FlashAttentionType::PImplType FlashAttentionAlgos[] = {
     teco_slave_flash_attention_half,
     /* 01 */
     teco_slave_flash_attention_half_d256,
+    /* 02 */
+    teco_slave_flash_attention_half_d512,
 };
 
 // array of strings describied the names of reduce variance operator algorithm
@@ -61,6 +63,8 @@ static const char *FlashAttentionAlgosDiscription[] = {
     "teco_slave_flash_attention_half",
     /* 01 */
     "teco_slave_flash_attention_half_d256",
+    /* 02 */
+    "teco_slave_flash_attention_half_d512",
 };
 struct FlashAttentionOp : public BaseOp<FlashAttentionOp, FlashAttentionType> {
  public:

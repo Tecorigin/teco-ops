@@ -399,3 +399,7 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
 __global__ void teco_slave_flash_attention_half_d256(FlashAttentionArgs args) {
     flash_attention_half<64>(args);
 }
+
+__global__ void teco_slave_flash_attention_half_d512(FlashAttentionArgs args) {
+    flash_attention_half<32>(args);
+}

@@ -394,6 +394,32 @@ def test_d256():
     return all_ok
 
 
+def test_d512():
+    """D512 BM32 capacity, tile tails and paged causal reference."""
+    print("-" * 60)
+    print("D512 测试 (BM=32, H=16)")
+    all_ok = True
+    cases = [
+        ("d512_gqa_32", 1, [32], [32]),
+        ("d512_gqa_1", 1, [1], [1]),
+        ("d512_gqa_31", 1, [31], [31]),
+        ("d512_gqa_33", 1, [33], [33]),
+        ("d512_gqa_65", 1, [65], [65]),
+        ("d512_decode_tail", 1, [1], [65]),
+        ("d512_chunked_tail", 1, [33], [65]),
+        ("d512_mixed", 1, [1, 33], [65, 65]),
+        ("d512_non_gqa_33", 16, [33], [33]),
+    ]
+    for name, kv_heads, q_lens, kv_lens in cases:
+        q, kc, vc, bt = _make_random_fa_inputs(
+            q_lens, kv_lens, num_heads=16, num_kv_heads=kv_heads,
+            head_size=512,
+        )
+        ok, _ = _run_one_fa_test(q, kc, vc, q_lens, kv_lens, bt, label=name)
+        all_ok = all_ok and ok
+    return all_ok
+
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -412,6 +438,7 @@ if __name__ == "__main__":
 
     tests = [
         ("test_d256", test_d256),
+        ("test_d512", test_d512),
         ("test_prefill",  test_prefill),
         ("test_decode",  test_decode),
         ("test_chunked_prefill",  test_chunked_prefill),
