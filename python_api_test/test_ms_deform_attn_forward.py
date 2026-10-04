@@ -129,6 +129,47 @@ def check(
     return error < limit
 
 
+def check_subnormal_coordinates(dtype):
+    device = torch.device("sdaa")
+    batch, queries, heads, dim = 2, 4, 2, 3
+    height, width = 1, 167
+    shapes_cpu = torch.tensor([[height, width]], dtype=torch.int64)
+    value_cpu = torch.full(
+        (batch, height * width, heads, dim), 16.0, dtype=torch.float32
+    ).to(dtype)
+    x_coordinates = torch.tensor(
+        [6.079673767e-5, -5.793571472e-5, 0.0, 2.0**-14],
+        dtype=torch.float32,
+    )
+    locations_cpu = torch.zeros(
+        (batch, queries, heads, 1, 1, 2), dtype=torch.float32
+    )
+    locations_cpu[..., 0] = x_coordinates.view(1, queries, 1, 1, 1)
+    locations_cpu[..., 1] = 0.5
+    locations_cpu = locations_cpu.to(dtype)
+    weights_cpu = torch.ones((batch, queries, heads, 1, 1), dtype=dtype)
+
+    # Transfer directly from CPU so device-side arithmetic cannot flush the
+    # subnormal half coordinate bit patterns before the operator sees them.
+    shapes = shapes_cpu.to(device=device)
+    value = value_cpu.to(device=device).contiguous()
+    locations = locations_cpu.to(device=device).contiguous()
+    weights = weights_cpu.to(device=device).contiguous()
+    output = tecoops.ms_deform_attn_forward(value, shapes, locations, weights)
+
+    expected = reference(
+        value_cpu.float(), shapes_cpu, locations_cpu.float(), weights_cpu.float()
+    )
+    error = (output.cpu().float() - expected).abs().max().item()
+    limit = 5e-5 if dtype == torch.float32 else 2e-3
+    print(
+        f"dtype={dtype} subnormal-coordinate shape=(N={batch},Lq={queries},"
+        f"M={heads},D={dim}) max_error={error:.6e} "
+        f"{'PASSED' if error < limit else 'FAILED'}"
+    )
+    return error < limit
+
+
 if __name__ == "__main__":
     results = [
         check(torch.float32),
@@ -149,6 +190,8 @@ if __name__ == "__main__":
             dim=4,
             use_non_default_stream=True,
         ),
+        check_subnormal_coordinates(torch.float32),
+        check_subnormal_coordinates(torch.float16),
     ]
     passed = all(results)
     print("ALL PASSED" if passed else "SOME FAILED")

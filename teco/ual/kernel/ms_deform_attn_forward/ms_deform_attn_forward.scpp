@@ -30,10 +30,27 @@
 #include "ual/kernel/ms_deform_attn_forward/ms_deform_attn_forward.h"
 
 #include <cmath>
+#include <cstdint>
 
 #include "teco_kernel_context.h"
 
 namespace {
+
+__device__ inline float read_as_float(const float *data, size_t index) {
+    return data[index];
+}
+
+// Native half conversion flushes subnormals on SDAA. Preserve their bits before
+// coordinate scaling, which can amplify a tiny input error by the image width.
+__device__ inline float read_as_float(const half *data, size_t index) {
+    const std::uint16_t bits =
+        reinterpret_cast<const std::uint16_t *>(data)[index];
+    if ((bits & 0x7c00u) == 0) {
+        const float magnitude = static_cast<float>(bits & 0x03ffu) * 0x1p-24f;
+        return (bits & 0x8000u) ? -magnitude : magnitude;
+    }
+    return static_cast<float>(data[index]);
+}
 
 template <typename T>
 __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
@@ -80,8 +97,8 @@ __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
                     * points);
 
             for (int point = 0; point < points; ++point) {
-                const float sx = static_cast<float>(locations[loc_base + point * 2]);
-                const float sy = static_cast<float>(locations[loc_base + point * 2 + 1]);
+                const float sx = read_as_float(locations, loc_base + point * 2);
+                const float sy = read_as_float(locations, loc_base + point * 2 + 1);
                 const float x = sx * static_cast<float>(w) - 0.5f;
                 const float y = sy * static_cast<float>(h) - 0.5f;
                 const float x0f = floorf(x);
@@ -94,7 +111,7 @@ __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
                 const float wy1 = y - y0f;
                 const float wx0 = 1.0f - wx1;
                 const float wy0 = 1.0f - wy1;
-                const float aw = static_cast<float>(weights[weight_base + point]);
+                const float aw = read_as_float(weights, weight_base + point);
 
                 const size_t value_base =
                     (static_cast<size_t>(batch) * s + level_start) * m * d;
@@ -109,7 +126,7 @@ __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
                             const size_t value_index = value_base + (pixel * m + head) * d;
                             const float factor = wx[ix] * wy[iy] * aw;
                             for (int dim = 0; dim < d; ++dim) {
-                                acc[dim] += static_cast<float>(value[value_index + dim]) * factor;
+                                acc[dim] += read_as_float(value, value_index + dim) * factor;
                             }
                         }
                     }
