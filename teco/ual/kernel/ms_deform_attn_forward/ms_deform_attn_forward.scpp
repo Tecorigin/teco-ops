@@ -61,10 +61,10 @@ __device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
 
     for (size_t flat = begin; flat < end; ++flat) {
         size_t t = flat;
-        const int query = static_cast<int>(t % lq);
-        t /= lq;
         const int head = static_cast<int>(t % m);
-        const int batch = static_cast<int>(t / m);
+        t /= m;
+        const int query = static_cast<int>(t % lq);
+        const int batch = static_cast<int>(t / lq);
         float acc[128];
         for (int dim = 0; dim < d; ++dim) acc[dim] = 0.0f;
 

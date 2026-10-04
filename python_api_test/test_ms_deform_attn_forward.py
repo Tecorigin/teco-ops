@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Accuracy test for the inference-only MSDeformAttn forward primitive."""
 
+from contextlib import nullcontext
+
 import torch
 
 import _bootstrap
@@ -47,26 +49,107 @@ def reference(value, spatial_shapes, sampling_locations, attention_weights):
     ).reshape(n, queries, heads * dim)
 
 
-def check(dtype):
+def check(
+    dtype,
+    batch=1,
+    queries=5,
+    heads=2,
+    dim=3,
+    use_non_default_stream=False,
+):
     device = torch.device("sdaa")
-    shapes = torch.tensor([[3, 4], [2, 2]], dtype=torch.int64, device=device)
-    batch, queries, heads, dim, points = 1, 5, 2, 3, 2
-    value = torch.randn(batch, 16, heads, dim, dtype=dtype, device=device)
-    locations = torch.rand(
-        batch, queries, heads, 2, points, 2, dtype=dtype, device=device
-    ).contiguous()
-    weights = torch.rand(
-        batch, queries, heads, 2, points, dtype=dtype, device=device
-    ).contiguous()
-    output = tecoops.ms_deform_attn_forward(value, shapes, locations, weights)
-    expected = reference(value, shapes, locations, weights)
-    error = (output.float() - expected.float()).abs().max().item()
+    levels, points = 2, 2
+    value_len = 16
+    shapes_cpu = torch.tensor([[3, 4], [2, 2]], dtype=torch.int64)
+    value_cpu = (
+        torch.arange(batch * value_len * heads * dim, dtype=torch.float32)
+        .reshape(batch, value_len, heads, dim)
+        .remainder(23)
+        .mul(0.0625)
+        .sub(0.5)
+        .to(dtype)
+    )
+    locations_cpu = (
+        torch.arange(
+            batch * queries * heads * levels * points * 2, dtype=torch.float32
+        )
+        .reshape(batch, queries, heads, levels, points, 2)
+        .remainder(9)
+        .add(1)
+        .mul(0.1)
+        .to(dtype)
+    )
+    weights_cpu = (
+        torch.arange(batch * queries * heads * levels * points, dtype=torch.float32)
+        .reshape(batch, queries, heads, levels, points)
+        .remainder(7)
+        .add(1)
+        .div(8)
+        .to(dtype)
+    )
+
+    if use_non_default_stream:
+        if not hasattr(torch.sdaa, "Stream") or not hasattr(torch.sdaa, "stream"):
+            raise RuntimeError("torch.sdaa Stream API is required for stream coverage")
+        stream = torch.sdaa.Stream()
+        stream_context = torch.sdaa.stream(stream)
+    else:
+        stream = None
+        stream_context = nullcontext()
+
+    with stream_context:
+        shapes = shapes_cpu.to(device=device)
+        value = value_cpu.to(device=device)
+        # Queue device-side producers before the extension call. In the stream
+        # case, the call must observe these writes on the same non-default stream.
+        value = value.mul(1.25).add(0.25).contiguous()
+        locations = locations_cpu.to(device=device)
+        locations = locations.mul(0.75).add(0.125).contiguous()
+        weights = weights_cpu.to(device=device)
+        weights = weights.mul(0.5).add(0.25).contiguous()
+        output = tecoops.ms_deform_attn_forward(value, shapes, locations, weights)
+        if stream is not None:
+            stream.synchronize()
+
+    # Keep the oracle independent of the SDAA kernel and use FP32 CPU
+    # grid_sample for both supported input dtypes.
+    expected = reference(
+        value.cpu().float(),
+        shapes.cpu(),
+        locations.cpu().float(),
+        weights.cpu().float(),
+    )
+    error = (output.cpu().float() - expected).abs().max().item()
     limit = 5e-5 if dtype == torch.float32 else 2e-3
-    print(f"dtype={dtype} max_error={error:.6e} {'PASSED' if error < limit else 'FAILED'}")
+    print(
+        f"dtype={dtype} shape=(N={batch},Lq={queries},M={heads},D={dim}) "
+        f"non_default_stream={use_non_default_stream} max_error={error:.6e} "
+        f"{'PASSED' if error < limit else 'FAILED'}"
+    )
     return error < limit
 
 
 if __name__ == "__main__":
-    passed = check(torch.float32) and check(torch.float16)
+    results = [
+        check(torch.float32),
+        check(torch.float16),
+        check(
+            torch.float32,
+            batch=2,
+            queries=3,
+            heads=3,
+            dim=4,
+            use_non_default_stream=True,
+        ),
+        check(
+            torch.float16,
+            batch=2,
+            queries=3,
+            heads=3,
+            dim=4,
+            use_non_default_stream=True,
+        ),
+    ]
+    passed = all(results)
     print("ALL PASSED" if passed else "SOME FAILED")
     raise SystemExit(0 if passed else 1)
