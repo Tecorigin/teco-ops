@@ -50,6 +50,8 @@ class FlashAttentionExecutor : public TecoExecutor {
     int64_t getTheoryIoSize() override;
 
  private:
+    bool has_softmax_scale_;
+    float softmax_scale_;
     int max_prefill_len_;
     int max_decode_len_;
     int batch_size_;

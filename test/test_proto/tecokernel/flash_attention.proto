@@ -7,4 +7,5 @@ message FlashAttentionParam{
     optional int32 max_block_num            = 3;
     repeated int32 q_seq_lens               = 4;
     repeated int32 kv_seq_lens              = 5;
+    optional float softmax_scale            = 6;
 }
