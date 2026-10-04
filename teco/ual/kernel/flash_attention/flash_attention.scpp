@@ -152,14 +152,14 @@ __device__ void online_softmax_step(
     }
 }
 
-__global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
+template <int BM>
+__device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
     int tid = threadIdx;
     if (tid >= MIN(args.spe_num, args.local_head_num)) {
         return;
     }
     int num_kv_groups = args.local_head_num / args.local_kv_head_num;
 
-    int BM = 128;   // M block, 128 for ace
     int BN = 32;    // N block, 32 for ace; block_size
     int BK = args.size_per_head;   // head_dim
     int token_size = args.size_per_head * sizeof(half);
@@ -237,7 +237,7 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                     }
                 }
 
-                // gemm: Q * K^T = score, using teco_hal matmul M2=128, N2=32
+                // gemm: Q * K^T = score, using teco_hal matmul M2<=128, N2=32
                 {
                     MatmulConfig matmul_cfg;
                     Matmul matmul(matmul_cfg);
@@ -390,4 +390,12 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
         }
         cur_q_index += q_seq_len;
     }
+}
+
+__global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
+    flash_attention_half<128>(args);
+}
+
+__global__ void teco_slave_flash_attention_half_d256(FlashAttentionArgs args) {
+    flash_attention_half<64>(args);
 }

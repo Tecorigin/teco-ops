@@ -366,6 +366,34 @@ def test_multi_batch():
 
     return all_ok
 
+def test_d256():
+    """D256 BM64 capacity, query tile tails and paged causal reference."""
+    print("-" * 60)
+    print("D256 测试 (BM=64, H=16)")
+    all_ok = True
+    # Target first; remaining cases cover tile/block tails and right alignment.
+    cases = [
+        ("d256_gqa_32", 8, [32], [32]),
+        ("d256_gqa_64", 8, [64], [64]),
+        ("d256_gqa_65", 8, [65], [65]),
+        ("d256_gqa_128", 8, [128], [128]),
+        ("d256_gqa_129", 8, [129], [129]),
+        ("d256_gqa_256", 8, [256], [256]),
+        ("d256_non_gqa_65", 16, [65], [65]),
+        ("d256_decode_tail", 8, [1], [129]),
+        ("d256_chunked_tail", 8, [65], [129]),
+        ("d256_mixed", 8, [1, 65], [129, 65]),
+    ]
+    for name, kv_heads, q_lens, kv_lens in cases:
+        q, kc, vc, bt = _make_random_fa_inputs(
+            q_lens, kv_lens, num_heads=16, num_kv_heads=kv_heads,
+            head_size=256,
+        )
+        ok, _ = _run_one_fa_test(q, kc, vc, q_lens, kv_lens, bt, label=name)
+        all_ok = all_ok and ok
+    return all_ok
+
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -383,6 +411,7 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     tests = [
+        ("test_d256", test_d256),
         ("test_prefill",  test_prefill),
         ("test_decode",  test_decode),
         ("test_chunked_prefill",  test_chunked_prefill),
