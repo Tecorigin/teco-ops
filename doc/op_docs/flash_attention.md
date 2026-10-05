@@ -90,6 +90,8 @@ tecoops.flash_attn_varlen_func(
 `tecoopsFlashAttentionWithScale` 在原 C 接口 `max_block_num` 后新增 `float softmax_scale`，其余参数和布局一致。
 原 `tecoopsFlashAttention` 符号及默认 `1/sqrt(head_size)` 语义保持不变。
 Python `flash_attn_varlen_func` 的已有 `softmax_scale` 参数现在传到 kernel，有限零值和负值也按公式计算；非有限值拒绝执行。
+`softmax_scale=0` 会使所有有效 QK 分数变为 0，因此 softmax 在当前 query 可见的 KV 项上得到均匀 attention 权重；
+`softmax_scale=1` 则使用未缩放的 QK 内积作为分数。
 Python pybind 的完整位置参数 ABI 不变，调用方仍应显式提供 scale。
 该修复不改变 causal/window 支持或 kernel 数学实现。Gemma 的 scale=1 需要这项修复；D512 容量支持另见 PR41，本 PR 未做模型接入或性能声明。
 
