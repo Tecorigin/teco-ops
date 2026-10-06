@@ -87,7 +87,12 @@ tecoops.flash_attn_varlen_func(
 
 ### 参数信息
 
-tecoopsFlashAttention参数信息
+`tecoopsFlashAttention` 接收每 batch 的 query 长度；插件入口
+`tecoopsFlashAttentionCuSeqlensQ` 使用相同参数顺序，将 `q_seq_lens`
+替换为累计偏移 `cu_seqlens_q`。两种入口的长度元数据都必须是设备端
+`int32` 指针，不能传入主机地址；其他张量描述符和参数保持一致。
+累计入口直接在设备端计算 `cu_seqlens_q[b + 1] - cu_seqlens_q[b]`，
+不会把累计偏移当作每 batch 的长度，也不进行主机往返拷贝。
 
 | 参数           | 输入/输出 | 主机端/设备端 | 说明                                                               |
 | -------------- | --------- | ------------- | ------------------------------------------------------------------ |
@@ -95,8 +100,9 @@ tecoopsFlashAttention参数信息
 | max_seqlen_q   | 输入      | 主机端        | 最大 query 序列长度                                                |
 | max_seqlen_k   | 输入      | 主机端        | 最大 KV 序列长度                                                   |
 | max_block_num  | 输入      | 主机端        | KV cache 中最大 block 数量                                         |
-| q_seq_lens     | 输入      | 主机端        | 每 batch 的 query 长度，`[batch_size]`                           |
-| kv_seq_lens    | 输入      | 主机端        | 每 batch 的 KV 长度，`[batch_size]`                              |
+| q_seq_lens     | 输入      | 设备端        | 每 batch 的 query 长度，`[batch_size]`                           |
+| cu_seqlens_q   | 输入      | 设备端        | 仅累计入口：`[batch_size + 1]` int32，`[0, ..., total_q]`；替代 `q_seq_lens` |
+| kv_seq_lens    | 输入      | 设备端        | 每 batch 的 KV 长度，`[batch_size]`                              |
 | blockTableDesc | 输入      | 主机端        | block table 描述符                                                 |
 | blockTable     | 输入      | 设备端        | block id 映射表，`[batch_size, block_table_dim]` int32           |
 | qDataDesc      | 输入      | 主机端        | Q 数据描述符                                                       |
@@ -122,6 +128,7 @@ tecoopsFlashAttention参数信息
 | vCache        | float16  | `[max_block, num_kv_heads, block_size, head_size]` | Array    |
 | blockTable    | int32    | `[batch_size, block_table_dim]`                    | Array    |
 | q_seq_lens    | int32    | `[batch_size]`                                     | Array    |
+| cu_seqlens_q  | int32    | `[batch_size + 1]`（仅累计入口）                    | Array    |
 | kv_seq_lens   | int32    | `[batch_size]`                                     | Array    |
 | oData         | float16  | `[total_q, num_heads, head_size]`                  | Array    |
 | workspace     | void*    | 标量                                                 | -        |
