@@ -178,7 +178,10 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
     half *p_score = (half*)rt_spm_malloc(BM * BN * sizeof(half));    // BM * BN
     int cur_q_index = 0;
     for (int b = 0; b < args.batch_size; b++) {
-        int q_seq_len = args.q_seq_lens[b], k_seq_len = args.kv_seq_lens[b];
+        int q_seq_len = args.q_seq_lens_are_cumulative
+            ? args.q_seq_lens[b + 1] - args.q_seq_lens[b]
+            : args.q_seq_lens[b];
+        int k_seq_len = args.kv_seq_lens[b];
         memcpy(ldm_block_table, args.block_table + b * args.block_table_dim,
                args.block_table_dim * sizeof(int));
         for (int i = 0; i < q_seq_len; i += BM) {
