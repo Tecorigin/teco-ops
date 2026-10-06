@@ -32,6 +32,7 @@
 """
 import argparse
 import json
+import tempfile
 
 TEST_RESULTS = []
 from contextlib import nullcontext
@@ -322,6 +323,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cpu-only", action="store_true")
     parser.add_argument("--real-shapes", action="store_true")
+    parser.add_argument(
+        "--output-json",
+        help="Persist the detailed report here; by default the same JSON is emitted from a temporary directory and cleaned up.",
+    )
     args = parser.parse_args()
     cpu_checks()
     cpu_wrapper_contract()
@@ -338,5 +343,17 @@ if __name__ == "__main__":
             real_shapes(tecoops)
 
     if not args.cpu_only:
-        Path(__file__).resolve().parents[1].joinpath("backward_validation.json").write_text(
-            json.dumps(dict(passed=True, real_shapes=args.real_shapes, gradients=TEST_RESULTS), indent=2) + "\n")
+        report = dict(passed=True, real_shapes=args.real_shapes, gradients=TEST_RESULTS)
+        serialized = json.dumps(report, indent=2) + "\n"
+        if args.output_json:
+            report_path = Path(args.output_json).expanduser()
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(serialized)
+            print(f"backward validation JSON saved to {report_path}", flush=True)
+        else:
+            with tempfile.TemporaryDirectory(prefix="msda-backward-validation-") as report_dir:
+                report_path = Path(report_dir) / "backward_validation.json"
+                report_path.write_text(serialized)
+                print("BEGIN backward_validation.json (temporary; use --output-json to retain)", flush=True)
+                print(serialized, end="", flush=True)
+                print("END backward_validation.json", flush=True)
