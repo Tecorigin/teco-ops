@@ -308,3 +308,52 @@ source; this patch includes the disclosed PR36/41/42 combination.
 Its checksum is 5308055b25e87d217574561f4e9545f36d2e779092d83c7d3bcc305176995ca7.
 The isolated validated build is tied to this source and its own worker
 receipts; a newly built or installed vendor wheel requires its own gates.
+
+### D512 accumulator rescale SIMD verification (2026-10-07)
+
+The additional atomic mechanism changes only BM32 Step B: each FP32 accumulator
+element is multiplied by the same row scale using floatv16 load/multiply/store.
+Earlier Step E additions, softmax/rounding order, packing, DMA, tile sizes, SPM
+allocation and ABI retain their previous behavior. BM64/BM128 use the previous
+scalar rescale. Selection is compile-time.
+
+Independent hardware baseline is the prior accepted Step E combination on
+official main `de27305efed0a17ae926d21d5415d8b915614649`, core e88dd5c34; this
+new mechanism applies exactly to PR41 head5b8f65f. The model's isolated combined
+build also contains PR36/42 compatibility bindings. Fresh candidate source
+SHA256 `2630b68c14df8285bad0d1dd4f1bcc14fb77c124fc32c7d5dc3ce2e74d74b352` and core SHA256
+`d61208eeba2362714f9aab67d74d8f3dd9e57121991c90f0b5a17f62ee0fe4ef` are recorded separately from the unchanged
+Torch extension c727f57f. Vendor Python realpath is
+`/usr/local/python/bin/python3.12`; SDK/runtime3.2.0, Torch2.12.0a0+0d62256,
+Torch-SDAA20260623.8.51+d942f23.
+
+Own paired decode80 and prefill8 rows are bitwise equal to baseline, with
+original .02 reference tolerance, exact input/cache preservation, default and
+nondefault streams. Ordinary/fullgraph-eager,4352-boundary and poisoned-tail
+gates pass. FP16 Q[N,8,512], KV[blocks,1,32,512], scale1, device2, seed20261007,
+warmup5 and10 calls/trial are fixed across three micro runs:
+
+| N / KV lengths | Baseline three ms/call values | Candidate three ms/call values | Median baseline → candidate ms |
+| --- | --- | --- | --- |
+| 1 / 33 | [0.243227498, 0.244031404, 0.245578500] | [0.243547495, 0.243287499, 0.241812400] | 0.244031404 → 0.243287499 |
+| 1 / 4352 | [10.242068500, 10.248963395, 10.316291201] | [9.855969297, 9.855175199, 9.856668301] | 10.248963395 → 9.855969297 |
+| 4 / 33,65,1025,4352 | [13.125246100, 13.113395998, 13.116348104] | [12.621673202, 12.612573203, 12.612844200] | 13.116348104 → 12.612844200 |
+| 8 / 33,65,1025,4097,4320,4352,65,4097 | [42.709624901, 42.696079897, 42.764923704] | [41.114962404, 41.076609504, 41.112411401] | 42.709624901 → 41.112411401 |
+
+Long-KV micro latency decreases3.74–3.84%; the post-candidate baseline retains
+medians10.241912602 /13.111219398 /42.709663801ms for the three long cases.
+The short KV33 triples overlap, so no short-case improvement is claimed.
+The complete A-after triples and all focused cases are in the model proof.
+
+Own public TP2/FP16/context4352/chunk512 configuration matches32-token IDs
+on83 candidate requests, including65 requests over
+313.616906s. Actual workers retain the selected DSO
+mapping, eight D512 layer bindings and memory peaks. Baseline/candidate model raw seconds: [13.565518133, 13.524816754, 13.467264207] / [13.376095781, 13.331312942, 13.374056167]; medians 13.524816754 / 13.374056167. Ordered model runs are regression evidence; no end-to-end speedup is claimed.
+
+Provenance tests6/6, vendor-Python syntax, shell syntax and diff-check pass.
+Published U0 combined patch `9756790105110f8fd4ed610d8e12c9269d2992a331fb8a0a530134204b3b7600` reconstructs
+byte-identical tested source. Source/proof: Gemma model PR3,
+`validation/d512_rescale_simd_20261007.json`. Current-head official CI/full
+wheel, official py311, final committee accuracy and new long-input model tests
+were not executed. Earlier CI/review and accuracy records retain their original
+head/build scope.

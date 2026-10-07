@@ -283,8 +283,19 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 // Step B: o_accum: O *= exp(m_old - m_new)
                 for (int ri = 0; ri < cur_BM; ri++) {
                     float s = scale[ri];
-                    for (int rk = 0; rk < BK; rk++) {
-                        o_accum[ri * BK + rk] *= s;
+                    if constexpr (BM == 32) {
+                        floatv16 vscale = s;
+                        float *row = o_accum + ri * BK;
+                        for (int rk = 0; rk < BK; rk += 16) {
+                            floatv16 value;
+                            simd_load(value, row + rk);
+                            value = value * vscale;
+                            simd_store(value, row + rk);
+                        }
+                    } else {
+                        for (int rk = 0; rk < BK; rk++) {
+                            o_accum[ri * BK + rk] *= s;
+                        }
                     }
                 }
 
