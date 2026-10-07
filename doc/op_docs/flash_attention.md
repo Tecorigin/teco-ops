@@ -256,3 +256,44 @@ tecoops.flash_attn_varlen_func(
     seqused_k=seqused_k, causal=True, block_table=block_table, out=out,
 )
 ```
+
+### D512 SV accumulation SIMD verification (2026-10-07)
+
+Only the BM32 specialization replaces the scalar Step E FP32 additions with
+two `floatv16` additions per 32-column SV chunk. Per-element addition order,
+rescale, softmax, probability packing, DMA, ABI and the BM64/BM128 paths stay
+the same. Selection is compile-time; no forward-time backend switch is added.
+
+The paired measurement baseline is the combined PR36/41/42 Gemma source on
+official main `de27305efed0a17ae926d21d5415d8b915614649`. This PR's new kernel
+delta is independently applicable to PR41 head `5584d46`; the combined source
+is disclosed because the model also needs the other compatibility fixes.
+Vendor Python resolves to `/usr/local/python/bin/python3.12`; SDK/runtime3.2.0,
+Torch2.12.0a0+0d62256 and Torch-SDAA20260623.8.51+d942f23 were used.
+
+FP16 Q[N,8,512], KV[blocks,1,32,512], scale1, one logical device2, seed20261007,
+warmup5 and10 calls per trial. Each bracket contains all three ms/call values.
+
+| N / KV lengths | Baseline ms | Candidate ms | Median baseline → candidate ms |
+| --- | --- | --- | --- |
+| 1 /33 | [0.242017402,0.243326405,0.240724400] | [0.240233395,0.238871400,0.239240401] | 0.242017402 →0.239240401 |
+| 1 /4352 | [10.584034101,10.588059103,10.587743099] | [10.239770997,10.245721001,10.289950797] | 10.587743099 →10.245721001 |
+| 4 /33,65,1025,4352 | [13.557968498,13.639971300,13.569197600] | [13.118165702,13.117788697,13.125886599] | 13.569197600 →13.118165702 |
+| 8 /33,65,1025,4097,4320,4352,65,4097 | [44.135197904,44.132023799,44.195023697] | [42.701129499,42.771772301,42.764305399] | 44.135197904 →42.764305399 |
+
+The80 paired decode rows and8 paired prefill rows are bitwise equal to their
+independent baseline. Prefill Q2/33/64/128 spans KV33/65/1025/4352; original
+reference tolerance .02, default/nondefault streams and cache preservation
+are retained. The public opaque/fullgraph-eager,4352-boundary and poisoned-tail
+focused checks also pass. Candidate core SHA256 is
+`e88dd5c34e6cee2bec005dfb5b8696a555e48d83c6c68be2dffc25e3e37f47a8`.
+
+Own Gemma TP2/FP16/context4352 fixed greedy32 matches on83 candidate requests,
+including65 steady requests over318.317824s. A→B→A model raw seconds are
+[13.562570464,13.465909750,13.543346152] /
+[12.748440575,12.935509947,12.962619586] /
+[13.004446402,12.935581907,12.969123281]. The final baseline overlaps the
+candidate, so no end-to-end speedup is claimed. This is not full official
+wheel/CI,official py311 or final committee accuracy evidence. The source and
+worker/peak evidence are published in the Gemma model PR's
+`validation/d512_accumulate_simd_20261007.json`.
