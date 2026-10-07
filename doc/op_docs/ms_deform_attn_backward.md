@@ -191,7 +191,7 @@ forward atol/rtol2e-4 and gradient atol2e-5/rtol1e-3. Peak allocation/reservatio
 is888.853516/958MiB. Owned device processes are released.
 
 The independent model proof is in the deformable model PR's
-models/deformable-detr/validation-producer-go-20261007.json. Prior full20
+PyTorch/contrib/Detection/Deformable-DETR/validation-producer-go-20261007.json. Prior full20
 training/accuracy receipts belong to their original baseline; training was
 not repeated for this memory-load change. Current-head official CI/full
 wheel and final committee accuracy were not run. No L4 performance
