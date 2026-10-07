@@ -297,3 +297,14 @@ candidate, so no end-to-end speedup is claimed. This is not full official
 wheel/CI,official py311 or final committee accuracy evidence. The source and
 worker/peak evidence are published in the Gemma model PR's
 `validation/d512_accumulate_simd_20261007.json`.
+
+Public SIMD source reproduction: use the Gemma model PR public package at
+model_adaptations/Gemma4SCUdoudui. In a fresh checkout of official main
+de27305efed0a17ae926d21d5415d8b915614649, apply its archived
+op_learning/attention/gemma-d512-model/official_combined.patch with
+git apply --check --unidiff-zero and then git apply --unidiff-zero.
+The public build helper produces local library provenance for that exact
+source; this patch includes the disclosed PR36/41/42 combination.
+Its checksum is 5308055b25e87d217574561f4e9545f36d2e779092d83c7d3bcc305176995ca7.
+The isolated validated build is tied to this source and its own worker
+receipts; a newly built or installed vendor wheel requires its own gates.
