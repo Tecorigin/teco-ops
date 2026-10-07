@@ -292,3 +292,11 @@ source patch are published in the InternVL model PR validation folder.
 | [32,128] /add | [0.023417897,0.023027998,0.023428898] | [0.024035899,0.021677901,0.023622997] | 0.023417897 →0.023622997 |
 | [8,128] /plain | [0.020782999,0.021244900,0.023766002] | [0.024345901,0.021030998,0.021158898] | 0.021244900 →0.021158898 |
 | [8,128] /add | [0.023196999,0.023198902,0.021142000] | [0.022432901,0.023656996,0.023321901] | 0.023196999 →0.023321901 |
+
+Public proof source: InternVL model PR6 commit
+4f01e16ad891dea1ce88aa3b313735fdd2e09fda stores
+model_adaptations/InternVL3_5SCUdoudui/validation/rms_epilogue_simd_20261007.json
+and validation/epilogue-only.patch. Its README pins the isolated source
+build to operator code commit e29b53c256f366e6eee538d656bfbb56e867cefc.
+This later documentation only identifies that public proof; the tested
+kernel bytes and their source checksum remain unchanged.
