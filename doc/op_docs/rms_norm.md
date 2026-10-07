@@ -261,9 +261,11 @@ fused-add1.79–1.80x. Short D128 results have overlapping noise, including
 <1% negative median fluctuations; no blanket gain is claimed.
 
 Current-head official CI/full vendor wheel, official py311 and committee
-accuracy were not run. Other models' old PR37 evidence does not validate this
-new epilogue head. InternVL's independent proof and reproducible minimal
-source patch are published in the InternVL model PR validation folder.
+accuracy were not run. Historical current-stream evidence remains tied to its
+old builds. Hy's independent validation of this epilogue is recorded below;
+MiniCPM's historical RMSNorm evidence does not validate the new epilogue.
+InternVL's independent proof and reproducible minimal source patch are
+published in the InternVL model PR validation folder.
 
 
 | Shape /mode | Baseline ms/call (three raw values) | Candidate ms/call (three raw values) | Median baseline →candidate |
@@ -300,3 +302,64 @@ and validation/epilogue-only.patch. Its README pins the isolated source
 build to operator code commit e29b53c256f366e6eee538d656bfbb56e867cefc.
 This later documentation only identifies that public proof; the tested
 kernel bytes and their source checksum remain unchanged.
+
+## Hy-MT2 independent FP16 epilogue measurements (2026-10-07)
+
+This model branch independently tests PR37 SIMD source e29b53c256f366e6eee538d656bfbb56e867cefc (kernel SHA256 41a517c23ae849f0d36cbdb2746ea2b75e21e5f2efe4dbaf44b6ed99a62193be). The geometry comes from its own hidden2048 and Q/K128 profile; the eight measurements use FP16, epsilon1e-5, seed20261007, warmup25, wall100 iterations and profiler30 iterations per run, on physical device1 / local sdaa:0. All three raw values are retained below, in ms/call. These are separate Hy results; the InternVL results above are not reused as its validation.
+
+| Hy shape/mode | Baseline device raw | SIMD device raw | Median baseline / SIMD |
+| --- | --- | --- | --- |
+| hidden_decode [1,2048] | 0.031774, 0.031734, 0.031776 | 0.011307, 0.011267, 0.011273 | 0.031774 / 0.011273 |
+| hidden_decode_residual [1,2048] | 0.044166, 0.044159, 0.044144 | 0.024502, 0.024474, 0.024478 | 0.044159 / 0.024478 |
+| hidden_prefill [30,2048] | 0.03243, 0.03241, 0.032451 | 0.01198, 0.011955, 0.011948 | 0.032430 / 0.011955 |
+| hidden_prefill_residual [30,2048] | 0.045586, 0.045647, 0.045586 | 0.025911, 0.025857, 0.025884 | 0.045586 / 0.025884 |
+| q_decode [16,128] | 0.003811, 0.003832, 0.003814 | 0.002612, 0.002583, 0.002583 | 0.003814 / 0.002583 |
+| k_decode [4,128] | 0.003761, 0.003764, 0.003772 | 0.002538, 0.002529, 0.002524 | 0.003764 / 0.002529 |
+| q_prefill [480,128] | 0.032549, 0.032525, 0.032537 | 0.013541, 0.013546, 0.013537 | 0.032537 / 0.013541 |
+| k_prefill [120,128] | 0.01001, 0.009998, 0.010078 | 0.004972, 0.004992, 0.004977 | 0.010010 / 0.004977 |
+
+| Hy shape/mode | Baseline wall raw | SIMD wall raw | Median baseline / SIMD |
+| --- | --- | --- | --- |
+| hidden_decode [1,2048] | 0.062152, 0.062351, 0.062223 | 0.062266, 0.062562, 0.061947 | 0.062223 / 0.062266 |
+| hidden_decode_residual [1,2048] | 0.07448, 0.074606, 0.074794 | 0.074172, 0.07433, 0.074303 | 0.074606 / 0.074303 |
+| hidden_prefill [30,2048] | 0.062885, 0.063306, 0.06605 | 0.061374, 0.060719, 0.060869 | 0.063306 / 0.060869 |
+| hidden_prefill_residual [30,2048] | 0.073059, 0.073555, 0.073142 | 0.073195, 0.126163, 0.07235 | 0.073142 / 0.073195 |
+| q_decode [16,128] | 0.062829, 0.062723, 0.062826 | 0.060086, 0.059596, 0.059731 | 0.062826 / 0.059731 |
+| k_decode [4,128] | 0.062454, 0.062992, 0.062629 | 0.059936, 0.059633, 0.059698 | 0.062629 / 0.059698 |
+| q_prefill [480,128] | 0.061715, 0.061502, 0.061615 | 0.062499, 0.062401, 0.062312 | 0.061615 / 0.062401 |
+| k_prefill [120,128] | 0.061522, 0.061763, 0.061448 | 0.060515, 0.060371, 0.060122 | 0.061522 / 0.060371 |
+
+Only device kernel time shows a consistent reduction. Wall time is mostly dominated by dispatch, includes the 0.126163ms candidate outlier and the slightly negative Q-prefill median, and does not establish a stable wall or model speedup. The own FP16 wrapper focused suite passes36 cases/four graphs plus Fake/CPU rejection with its unchanged0.002 tolerances and baseline/candidate bitwise equality. Native BF16 capability is a separate deferred attempt because this public profile is FP16; it is not part of these measurements.
+
+A separate controlled Hy model supplement uses the accepted public run.sh,
+TP1, FP16, context8192 and the default compiler. Diagnostic worker RPC is
+enabled with VLLM_SERVER_DEV_MODE=1 and a worker extension. Both arms select
+129 TecoopsRMSNorm modules with SDAA FP16 weights and epsilon1e-5. Before/after
+worker receipts retain the actual unique mapped extension/core paths and
+SHA256 values for each isolated package:
+
+- Baseline core: 86576a574ef6c3cd52521245d5e048c9981a8444e6e4ba36822b9bb0f3a04d95;
+  extension: 6e10da7c805d24d431da546d75488695f7abcae1d90c2e7e767f0fc5fde521d6.
+- Candidate core: d26791a5c1f9d902f2449baf62c58490aafa455cab357f8b93bbc029f525da97;
+  extension: c7d4a8c02138d0742e1da46e9aff79515d75b364b02171fd0b03e34db5cc3f4b.
+
+Both own text prompts have identical prompt IDs and all32 greedy output IDs
+in both arms and match this model branch's prior own references. Both process
+peaks, including startup with no reset, are14455050752 bytes allocated and
+14816378880 bytes reserved (13.462315 /13.798828 GiB), unchanged after the two
+requests. Services stop and physical device1 is released to0 MB/no process.
+The original A/B did not retain module/maps/peak data; its original incomplete
+fields remain unchanged. This later supplement supplies independent evidence;
+module enumeration is not a forward invocation total or a speed measurement.
+
+The public own proof and epilogue-only.patch are in
+[Hy model PR5](https://github.com/Tecorigin/tecovllm-modelzoo/pull/5), model
+commit2c4378bf0a0f5794b0b3d1fd5a35d2d5e947ce95, under
+model_adaptations/HyMT2SCUdoudui/validation/rms_epilogue_simd_20261007.json.
+Its canonical folder tree b25d30b56a1e93056ad23e9c5be0d7e60d0d7f15 exactly
+matches remote source/proof commit c36d277bebc46c49a08037a37b9dbc5a21cd00b7.
+The accepted public runtime/launcher source is unchanged. Earlier303-second
+attention evidence is historical, not a fresh epilogue steady test. This
+epilogue-only work does not change attention/cache/communication. Current
+head official CI/full wheel, official py311, full8192 request and committee
+accuracy were not run. No whole-model or stable host wall speedup is claimed.
