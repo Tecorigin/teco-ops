@@ -83,6 +83,7 @@ struct CornerRecords {};
 template <typename T>
 struct CornerRecords<T, true> {
     T rows[4][128] __attribute__((aligned(64)));
+    T go_record[128] __attribute__((aligned(64)));
 };
 
 template <typename T, bool UseList = false>
@@ -108,8 +109,16 @@ __device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
         const int head = static_cast<int>(owner % heads);
         const int batch = static_cast<int>(owner / heads / queries);
         float go[128];
+        if constexpr (UseList) {
+            ::memcpy(corner_records.go_record, grad_output + owner * dims,
+                     static_cast<size_t>(dims) * sizeof(T));
+        }
         for (int dim = 0; dim < dims; ++dim) {
-            go[dim] = load_scalar(grad_output, owner * dims + dim);
+            if constexpr (UseList) {
+                go[dim] = load_scalar(corner_records.go_record, dim);
+            } else {
+                go[dim] = load_scalar(grad_output, owner * dims + dim);
+            }
         }
         int level_start = 0;
         for (int level = 0; level < levels; ++level) {

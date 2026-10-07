@@ -125,3 +125,74 @@ cd test/build
 中位训练耗时下降 26.108%，峰值 allocated 约下降 59.3%。该结果属于组合路径，不能单独归因 CAS 或某一项 DMA。307.558 秒内共 18 轮（216 次前向和 216 次反向原语调用），每轮均检查 3 项输出和全部 236 个参数/输入梯度；输出 atol/rtol=2e-4，梯度 atol=2e-5、rtol=1e-3。独立 smoke 中最大输出误差 2.324581e-6、最大梯度误差 1.800777e-5，重复前向位级一致，SGD 更新 230 个参数。真实 encoder/decoder FP32/FP16 原语对拍、C++ 实际 DIFF1 门限 5e-5、长链/空链、默认/非默认 stream 和 36 组 value+grad_output offset=1 的严格位级回归均通过。
 
 上述测试使用随机权重与合成 loss；预训练检测 checkpoint 和官方任务精度未验证，生产模型默认 grid 不在本 PR 中修改。当前证据不支持 FP16 完整模型性能或任务准确率声明。
+
+## List producer grad_output record (2026-10-07)
+
+The List-only bilinear backward specialization stages one owner row of
+grad_output in an aligned LDM T[128] record with an exact D*sizeof(T) blocking
+copy, then reads those elements with the existing load_scalar half/float
+conversion. The atomic specialization has no record or copy. Compile-time
+selection preserves corner DMA, List ownership/consumer, FP32 arithmetic,
+CAS behavior, output layout and ABI. This is one mechanism, not a new
+algorithm or backend selection in forward.
+
+Official main is de27305efed0a17ae926d21d5415d8b915614649; this delta applies to
+PR40 head e92caeacbcc709ea934a98cf6bbadfc2afee1df9. The compiled paired baseline
+is the frozen b565d402 source on model/deformable-detr commit46f6d26.
+All18 runtime source files match current e92 Git bytes; b565→e92 changes only
+README and three forward test-executor BSD headers. This establishes source
+equivalence, not an independently rebuilt e92 wheel.
+Candidate target source SHA256:
+17e2b03a8e4168861ee0d4bea4b62b9d39f84d38421e158b9152babd7b9ed23e.
+Fresh candidate core SHA256:
+618195bf59c3bc5946d7865a4eddd6131eec93b788884b8b5a9d99e7656f9a56.
+Paired baseline core is ef437793422d1c7b89e4f1680b8430f53c5d28b7b21f3bae908911457853217d;
+both use byte-identical extension
+4c44e07c3e02f9433416d2afe7c28d55b3b87c6bbac6f40f4b62549af240392a.
+Vendor Python /home/py312/bin/python resolves to
+/usr/local/python/bin/python3.12; SDK/runtime3.2.0, Torch2.12.0a0+0d62256 and
+Torch-SDAA20260623.8.51+d942f23 are unchanged.
+
+Original focused backward132 comparisons, offset216 exact gradient checks,
+List48 cases including hot65536/empty/both streams, and owned forward tests
+pass. FP64 finite-difference/quantized reference/mock-autograd checks, syntax
+and diff checks pass. The initial forward bootstrap shadowed the local
+package with installed tecoops; that failed log is retained, and rerunning
+the same test with explicit candidate PYTHONPATH passed. No threshold changed.
+
+Independent actual VOC geometry is N2/S494/H8/D32/L1/P4, encoderQ494 and
+decoderQ300, from two padded608x810 images. L1 primitive timing below uses
+visible device1, same inputs, warmup1 and three sequential wall-clock trials,
+with synchronization. Units are seconds per backward call.
+
+| Dtype /query role | Baseline three raw seconds | Candidate three raw seconds | Median baseline →candidate |
+| --- | --- | --- | --- |
+| FP32 /encoder494 | .010953173,.010984883,.010958273 | .010979623,.010992003,.010938033 | .010958273 →.010979623 |
+| FP32 /decoder300 | .006720493,.006702043,.006698533 | .006664404,.006704563,.006696643 | .006702043 →.006696643 |
+| FP16 /encoder494 | .019909751,.019745651,.019779981 | .018773673,.018396995,.018574864 | .019779981 →.018574864 |
+| FP16 /decoder300 | .013969566,.013405497,.013691296 | .013351487,.012815219,.013284647 | .013691296 →.013284647 |
+
+FP16 same-geometry primitive latency decreases6.09%/2.97% in these trials.
+FP32 primitive ranges overlap; no stable FP32 gain is claimed. The actual
+accepted VOC model is FP32, so FP16 primitive results are not its model gain.
+
+Actual model forward/loss/backward checks pass with12 native forward and12
+native backward calls,286 finite parameter gradients and loss15.6343355178833.
+Its no-capture timing path removes CPU tensor capture before warmup and
+three measured trials; finite-gradient checks run after elapsed time.
+Model baseline [.606179200,.624600624,.621106923], median.621106923s;
+candidate [.610509759,.611365727,.621194002], median.611365727s. Ranges overlap,
+so the1.568% observed median difference is not claimed as stable model gain.
+
+Candidate reference-checked steady300.711627s/380rounds passes4560 forward
+and4560 backward calls, with no optimizer steps. Maximum output error
+2.50339508e-6 and gradient error3.09944153e-6 stay within the original
+forward atol/rtol2e-4 and gradient atol2e-5/rtol1e-3. Peak allocation/reservation
+is888.853516/958MiB. Owned device processes are released.
+
+The independent model proof is in the deformable model PR's
+models/deformable-detr/validation-producer-go-20261007.json. Prior full20
+training/accuracy receipts belong to their original baseline; training was
+not repeated for this memory-load change. Current-head official CI/full
+wheel and final committee accuracy were not run. No L4 performance
+extrapolation, pretrained-weight copy or global package change is included.
