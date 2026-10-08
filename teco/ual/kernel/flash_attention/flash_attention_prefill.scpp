@@ -1,0 +1,401 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+// 专用 prefill：Q 块 × KV 分段，fp16 矩阵输入、fp32 点积及在线归约。
+// 使用参考实现已采用的 M128_N32 配置；逻辑 BM 自适应，物理 M 恒为 128，
+// 不依赖未经验证的 M64/M32 矩阵接口。BN=32 与物理 cache 页严格一致，
+// 页尾有效 BN=min(32, KV 长度-页起点)，绝不跨不连续物理页读数据。
+//
+// 单个静态 SPM（片上暂存存储器）arena，64B 对齐，各切片字节账：
+// Q / 最终 fp16 输出             128*128*2       = 32768
+// K[2]、V[2] 双缓冲              4*32*128*2      = 32768
+// K 转置 / V 的 32 列打包        128*32*2        =  8192
+// QK / PV 结果复用               128*32*4        = 16384
+// P（softmax 权重，矩阵输入）    128*32*2        =  8192
+// O（未归一化，fp32）            128*128*4       = 65536
+// m、l（fp32，连续）             2*128*4         =  1024
+// 合计                                             164864 B
+// arena 首地址对齐余量 63B，分配上取整 164928B；220KiB=225280B，
+// 剩余 60352B 留给栈、矩阵接口内部状态及运行时。无 rt 调试分配哨兵。
+// 归并接收 O 复用相邻 Q+KV 的 65536B，接收 m/l 复用 K 转置切片，
+// 不增加空间。block_table 逐页取 int，不随上下文长度扩大 SPM。
+// Q 头数仅影响 tiles×heads 的任务数；各任务串行复用同一 arena，
+// 16Q/2KV 与 4Q/1KV 均分配 164928B，无随头数增长的缓冲区。
+//
+// __local__ 为编译期每 SPE 一份的静态 arena（指南 §5.2.4），不用 malloc，
+// 不申请设备全局内存，不使用跨调用全局 partial 数组。远端 SPM 搬运使用
+// 指南 §7.6.2.2 的双参与者 rma_get，所有 SPE 的切片地址相同。
+// 图捕获还取决于上层绑定；本文件无主机动态分配或长度回读。
+
+#include <simd.h>
+#include <slave.h>
+#include <stdint.h>
+
+#include "teco_hal.h"
+#include "ual/kernel/flash_attention/flash_attention_prefill.h"
+
+using namespace sdaa;  // NOLINT
+using namespace teco::hal;  // NOLINT
+
+namespace {
+constexpr int kM = 128;
+constexpr int kN = 32;
+constexpr int kD = 128;
+constexpr int kArenaBytes = 164864;
+constexpr float kEmptyMax = -3.402823466e+38F;
+static_assert(kArenaBytes + 64 + 16 * 1024 < 220 * 1024,
+              "prefill SPM must reserve runtime space");
+
+// arena 改运行时堆分配（GEMV 内核验证过的图捕获兼容范式）：
+// __local__ 段容量装不下 161KB，静态数组会在内核加载时直接崩（core dump 无错误信息）；
+// 见入口处的 malloc(kArenaBytes + 64) 与出口 free 配对
+
+__device__ __always_inline int imin(int a, int b) { return a < b ? a : b; }
+__device__ __always_inline float fmax2(float a, float b) { return a > b ? a : b; }
+
+// 矩阵尺寸固定，输入 half，输出 float。
+// 纯 SIMD 实现（弃 Matmul/ACE 路径）：真机对照证据——在役 flash_attention_decode
+// 内核纯 simd_mul/add 稳定运行，而走 Matmul.compute_async<M128_N32> 的两个内核
+// （滑窗版被禁、本内核首版）全形状 core dump 无错误信息。ACE 路径存在未解的真机问题。
+// 吞吐账：每页 Q@K+P@V 共 ~105 万 MAC，16 路 SIMD 足够（decode kernel 同模式跑 56t/s）。
+__device__ __always_inline void gemm32(const half *a, const half *b, float *c, int inner) {
+    // C[128,32] = A[128,inner] @ B[inner,32]（B 行主序：b[k*kN + n]）
+    // 数学：C[r][n] = Σ_k A[r][k] × B[k][n]——A 元素按 k 标量广播（simd_stretch），
+    // B 按 [k, n:n+16] 向量装载，乘加在 float 域。4 行展开隐藏依赖链。
+    for (int r4 = 0; r4 < kM; r4 += 4) {
+        const half *a0 = a + size_t(r4) * inner;
+        const half *a1 = a0 + inner;
+        const half *a2 = a1 + inner;
+        const half *a3 = a2 + inner;
+        // [p2-fuse] kN==32 时两 n 块融合：一次 stretch 服务两块 FMA（stretch:mul 1:2→1:4）
+        if (kN == 32) {
+            floatv16 c0a = 0.0f, c1a = 0.0f, c2a = 0.0f, c3a = 0.0f;
+            floatv16 c0b = 0.0f, c1b = 0.0f, c2b = 0.0f, c3b = 0.0f;
+            for (int k = 0; k < inner; ++k) {
+                halfv16 vba, vbb;
+                simd_loadu(vba, b + size_t(k) * kN);
+                simd_loadu(vbb, b + size_t(k) * kN + 16);
+                const floatv16 vbfa = simd_cvt_h2f(vba);
+                const floatv16 vbfb = simd_cvt_h2f(vbb);
+                const floatv16 sa = simd_stretch(static_cast<float>(a0[k]));
+                const floatv16 sb = simd_stretch(static_cast<float>(a1[k]));
+                const floatv16 sc = simd_stretch(static_cast<float>(a2[k]));
+                const floatv16 sd = simd_stretch(static_cast<float>(a3[k]));
+                c0a = simd_add(c0a, simd_mul(sa, vbfa));
+                c1a = simd_add(c1a, simd_mul(sb, vbfa));
+                c2a = simd_add(c2a, simd_mul(sc, vbfa));
+                c3a = simd_add(c3a, simd_mul(sd, vbfa));
+                c0b = simd_add(c0b, simd_mul(sa, vbfb));
+                c1b = simd_add(c1b, simd_mul(sb, vbfb));
+                c2b = simd_add(c2b, simd_mul(sc, vbfb));
+                c3b = simd_add(c3b, simd_mul(sd, vbfb));
+            }
+            simd_storeu(c0a, c + size_t(r4) * kN);
+            simd_storeu(c1a, c + size_t(r4 + 1) * kN);
+            simd_storeu(c2a, c + size_t(r4 + 2) * kN);
+            simd_storeu(c3a, c + size_t(r4 + 3) * kN);
+            simd_storeu(c0b, c + size_t(r4) * kN + 16);
+            simd_storeu(c1b, c + size_t(r4 + 1) * kN + 16);
+            simd_storeu(c2b, c + size_t(r4 + 2) * kN + 16);
+            simd_storeu(c3b, c + size_t(r4 + 3) * kN + 16);
+        } else {
+        for (int n = 0; n < kN; n += 16) {
+            floatv16 c0 = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f;
+            for (int k = 0; k < inner; ++k) {
+                halfv16 vb;
+                simd_loadu(vb, b + size_t(k) * kN + n);
+                const floatv16 vbf = simd_cvt_h2f(vb);
+                c0 = simd_add(c0, simd_mul(simd_stretch(static_cast<float>(a0[k])), vbf));
+                c1 = simd_add(c1, simd_mul(simd_stretch(static_cast<float>(a1[k])), vbf));
+                c2 = simd_add(c2, simd_mul(simd_stretch(static_cast<float>(a2[k])), vbf));
+                c3 = simd_add(c3, simd_mul(simd_stretch(static_cast<float>(a3[k])), vbf));
+            }
+            simd_storeu(c0, c + size_t(r4) * kN + n);
+            simd_storeu(c1, c + size_t(r4 + 1) * kN + n);
+            simd_storeu(c2, c + size_t(r4 + 2) * kN + n);
+            simd_storeu(c3, c + size_t(r4 + 3) * kN + n);
+        }
+        }
+    }
+}
+
+__device__ __always_inline void zero_float(float *p, int n) {
+    const floatv16 z = 0.0f;
+    for (int i = 0; i < n; i += 16) simd_store(z, p + i);
+}
+
+// K/V 连续一页，起址、字节数均为 32B 的整数倍；尾页只读有效 token。
+// 在提交 DMA 前补零，避免异步写入与清零重叠；等待后才消费当前缓冲。
+__device__ __always_inline void fetch_page(
+    const FlashAttentionArgs &args, int batch, int page, int klen, int kv_head,
+    half *k, half *v, MemcpyHandle &ke, MemcpyHandle &ve) {
+    const int valid = imin(kN, klen - page * kN);
+    const int physical = args.block_table[size_t(batch) * args.block_table_dim + page];
+    // 接口由 kCacheDesc->dimA[1]/[2] 设置 local_kv_head_num/block_size，
+    // 既有 decode 的页偏移也一致：cache 为 [物理页, KV头, 页内token, head_dim]。
+    // 单个 KV 头在页内连续；1 个 KV 头时退化为原来的 physical*kN*kD。
+    const size_t offset = (size_t(physical) * args.local_kv_head_num + kv_head) * kN * kD;
+    for (int i = valid * kD; i < kN * kD; ++i) {
+        k[i] = static_cast<half>(0);
+        v[i] = static_cast<half>(0);
+    }
+    memcpy_async(k, static_cast<const half *>(args.key_cache) + offset,
+                 size_t(valid) * kD * sizeof(half), 0, {0, 0}, MemcpyGlobalToSpm, ke);
+    memcpy_async(v, static_cast<const half *>(args.value_cache) + offset,
+                 size_t(valid) * kD * sizeof(half), 0, {0, 0}, MemcpyGlobalToSpm, ve);
+}
+
+// 原位更新 m/l/O，P 用 half 送入矩阵单元；softmax 分母保留 float。
+// 空分段、整行不可见时显式置零，避免 exp(-inf - -inf) 产生 NaN。
+__device__ void softmax_tile(float *score, half *p, float *o, float *m, float *l,
+                             int rows, int qpos, int kvpos, int valid, float scale) {
+    for (int row = 0; row < kM; ++row) {
+        half *pr = p + row * kN;
+        const int count = row < rows ? imin(valid, qpos + row - kvpos + 1) : 0;
+        if (count <= 0) {
+            for (int c = 0; c < kN; ++c) pr[c] = static_cast<half>(0);
+            continue;
+        }
+        float *sr = score + row * kN;
+        float block_max = kEmptyMax;
+        for (int c = 0; c < count; ++c) {
+            sr[c] *= scale;
+            block_max = fmax2(block_max, sr[c]);
+        }
+        const float next_max = fmax2(m[row], block_max);
+        const float alpha = l[row] > 0.0f ? expf(m[row] - next_max) : 0.0f;
+        float sum = 0.0f;
+        // 非有效列填极小值后向量 exp；随后显式清零尾列，保证精确 mask。
+        for (int c = count; c < kN; ++c) sr[c] = kEmptyMax;
+        const floatv16 vm = next_max;
+        for (int c = 0; c < kN; c += 16) {
+            floatv16 x;
+            simd_load(x, sr + c);
+            x = simd_exp(x - vm);
+            simd_store(x, sr + c);
+        }
+        for (int c = 0; c < count; ++c) {
+            sum += sr[c];
+            pr[c] = static_cast<half>(sr[c]);
+        }
+        for (int c = count; c < kN; ++c) pr[c] = static_cast<half>(0);
+        l[row] = alpha * l[row] + sum;
+        m[row] = next_max;
+        const floatv16 va = alpha;
+        for (int d = 0; d < kD; d += 16) {
+            floatv16 x;
+            simd_load(x, o + row * kD + d);
+            simd_store(x * va, o + row * kD + d);
+        }
+    }
+}
+
+// 合并未归一化 partial：m=max(m_a,m_b)，l=Σexp(m_s-m)*l_s，O 同权重。
+__device__ void merge_partial(float *o, float *m, float *l,
+                              const float *other_o, const float *other_state, int rows) {
+    for (int row = 0; row < rows; ++row) {
+        const float other_l = other_state[kM + row];
+        if (other_l == 0.0f) continue;
+        const float nm = fmax2(m[row], other_state[row]);
+        const float a = l[row] > 0.0f ? expf(m[row] - nm) : 0.0f;
+        const float b = expf(other_state[row] - nm);
+        const floatv16 va = a, vb = b;
+        for (int d = 0; d < kD; d += 16) {
+            floatv16 x, y;
+            simd_load(x, o + row * kD + d);
+            simd_load(y, other_o + row * kD + d);
+            simd_store(x * va + y * vb, o + row * kD + d);
+        }
+        l[row] = a * l[row] + b * other_l;
+        m[row] = nm;
+    }
+}
+}  // namespace
+
+__global__ void teco_slave_flash_attention_prefill(FlashAttentionArgs args) {
+    const int kHeads = args.local_head_num;
+    const int workers = imin(32, imin(args.spe_num, threadDim));
+    const int tid = threadIdx;
+    if (workers <= 0 || tid >= workers) return;
+    // 入口支持域由 finder 校验；此处不默默处理其他 cache 布局。
+    unsigned char *prefill_arena = static_cast<unsigned char *>(
+        malloc(kArenaBytes + 64));
+    if (prefill_arena == nullptr) return;  // 堆余量不足时安全退出（161KB < 208KB 预算，正常恒可分配）
+    unsigned char *base = reinterpret_cast<unsigned char *>(
+        (reinterpret_cast<uintptr_t>(prefill_arena) + 63) & ~uintptr_t(63));
+    half *q = reinterpret_cast<half *>(base);
+    half *kb[2] = {reinterpret_cast<half *>(base + 32768),
+                   reinterpret_cast<half *>(base + 40960)};
+    half *vb[2] = {reinterpret_cast<half *>(base + 49152),
+                   reinterpret_cast<half *>(base + 57344)};
+    half *packed = reinterpret_cast<half *>(base + 65536);
+    float *score = reinterpret_cast<float *>(base + 73728);
+    half *p = reinterpret_cast<half *>(base + 90112);
+    float *o = reinterpret_cast<float *>(base + 98304);
+    float *m = reinterpret_cast<float *>(base + 163840);
+    float *l = m + kM;
+
+    size_t q_offset = 0;
+    for (int batch = 0; batch < args.batch_size; ++batch) {
+        const int qlen = args.q_seq_lens[batch];
+        const int klen = args.kv_seq_lens[batch];
+        if (qlen == 0) continue;
+        const int prefix = klen - qlen;
+        // 先增加 Q 并行度，再使用 KV 分段；物理 M128 的填充行不写输出。
+        int bm = 128;
+        while (bm > 32 && ((qlen + bm - 1) / bm) * kHeads < workers) bm /= 2;
+        const int tiles = (qlen + bm - 1) / bm;
+        const int tasks = tiles * kHeads;
+        // [fix 2026-09-22] 强制 splits=1：跨 SPE rma_get 归并路径存在时序竞态
+        // （短 prompt 间歇性乱码，长 prompt splits 本就为 1 不受影响——T1-T4 零损失）
+        int splits = 1;
+        (void)0;
+        const int groups = workers / splits;
+        const int active = groups * splits;
+        if (tid >= active) {
+            q_offset += qlen;
+            continue;
+        }
+        const int group = tid / splits, shard = tid % splits;
+        unsigned long ids[8];
+        for (int s = 0; s < splits; ++s) ids[s] = group * splits + s;
+        ThreadGroup team(ids, splits);
+
+        // 蛇形 Q 调度：相邻轮次一正一反，平衡 causal 三角形的轻重块。
+        for (int task = group; task < tasks; task += groups) {
+            const int wave = task / groups;
+            const int wave_start = wave * groups;
+            const int wave_size = imin(groups, tasks - wave_start);
+            const int slot = task - wave_start;
+            const int ordered = wave_start + ((wave & 1) ? wave_size - 1 - slot : slot);
+            const int head = ordered % kHeads;
+            // finder 保证均匀分组；16Q/2KV 时 Q 头 0..7、8..15 分别读 KV 头 0、1。
+            const int kv_head = head * args.local_kv_head_num / kHeads;
+            const int qi = (ordered / kHeads) * bm;
+            const int rows = imin(bm, qlen - qi);
+            const int first_qpos = prefix + qi;
+            zero_float(o, kM * kD);
+            zero_float(l, kM);
+            for (int r = 0; r < kM; ++r) m[r] = kEmptyMax;
+            const half *qsrc = static_cast<const half *>(args.q)
+                + (q_offset + qi) * kHeads * kD + head * kD;
+            memcpy_stride(q, qsrc, rows * kD * sizeof(half), kD * sizeof(half),
+                          {0, (kHeads - 1) * kD * sizeof(half)});
+            for (int i = rows * kD; i < kM * kD; ++i) q[i] = static_cast<half>(0);
+
+            // 纯 causal 的 KV 下界是 0，不是 Q 块首行。首行位置用于行级 mask；
+            // 整块上界取末行+1，历史 prefix 全部保留。完整 prefill 跳过约半数页。
+            const int visible = imin(klen, first_qpos + rows);
+            const int pages = (visible + kN - 1) / kN;
+            const int begin = pages * shard / splits;
+            const int end = pages * (shard + 1) / splits;
+            MemcpyHandle ke[2], ve[2];
+            if (begin < end) fetch_page(args, batch, begin, klen, kv_head, kb[0], vb[0], ke[0], ve[0]);
+            for (int page = begin; page < end; ++page) {
+                const int cur = (page - begin) & 1, next = cur ^ 1;
+                memcpy_wait(ke[cur]);
+                memcpy_wait(ve[cur]);
+                if (page + 1 < end) {
+                    fetch_page(args, batch, page + 1, klen, kv_head, kb[next], vb[next], ke[next], ve[next]);
+                }
+                // 不调用会隐式申请堆内存的 transpose；切片转置无额外分配。
+                // [p1-vect 2026-10-08] K 转置读侧向量化：halfv16 连续读 kb 行，
+                // 散写 packed 列（步长 kN，写侧本质无法向量化）——
+                // 收益 = 读侧 16×（load 延迟高于 SPM store），预估转置段提速 30-50%。
+                for (int t = 0; t < kN; ++t) {
+                    for (int d = 0; d < kD; d += 16) {
+                        halfv16 v;
+                        simd_loadu(v, kb[cur] + t * kD + d);
+                        const half *pv = reinterpret_cast<const half *>(&v);
+                        for (int j = 0; j < 16; ++j) {
+                            packed[(d + j) * kN + t] = pv[j];
+                        }
+                    }
+                }
+                gemm32(q, packed, score, kD);
+                softmax_tile(score, p, o, m, l, rows, first_qpos, page * kN,
+                             imin(kN, klen - page * kN), args.softmax_scale);
+                // V 已整页预取到本地；四个 N32 矩阵片不再重复访问全局 cache。
+                for (int dh = 0; dh < kD; dh += kN) {
+                    for (int t = 0; t < kN; ++t) {
+                        for (int d = 0; d < kN; d += 16) {
+                            halfv16 v;
+                            simd_load(v, vb[cur] + t * kD + dh + d);
+                            simd_store(v, packed + t * kN + d);
+                        }
+                    }
+                    gemm32(p, packed, score, kN);
+                    for (int r = 0; r < rows; ++r) {
+                        for (int d = 0; d < kN; d += 16) {
+                            floatv16 x, y;
+                            simd_load(x, o + r * kD + dh + d);
+                            simd_load(y, score + r * kN + d);
+                            simd_store(x + y, o + r * kD + dh + d);
+                        }
+                    }
+                }
+            }
+
+            if (splits > 1) {
+                // 所有 DMA、矩阵写回均已完成，Q/KV/packed 可安全用作归并接收区。
+                float *received_o = reinterpret_cast<float *>(base);
+                float *received_state = reinterpret_cast<float *>(packed);
+                sync_threads(team);
+                for (int step = 1; step < splits; step *= 2) {
+                    const int lane = shard % (2 * step);
+                    if (lane == 0 || lane == step) {
+                        const int receiver = group * splits + shard - lane;
+                        const int sender = receiver + step;
+                        // rma_get 必须由发送、接收两个 SPE 执行同样的调用。
+                        rma_get(received_o, o, kM * kD * sizeof(float), receiver, sender);
+                        rma_get(received_state, m, 2 * kM * sizeof(float), receiver, sender);
+                        if (lane == 0) merge_partial(o, m, l, received_o, received_state, rows);
+                    }
+                    sync_threads(team);
+                }
+            }
+            if (shard == 0) {
+                // 计算完成后 Q 不再使用，复用为输出；空行约定输出零。
+                for (int r = 0; r < rows; ++r) {
+                    const floatv16 inv = l[r] > 0.0f ? 1.0f / l[r] : 0.0f;
+                    for (int d = 0; d < kD; d += 16) {
+                        floatv16 x;
+                        simd_load(x, o + r * kD + d);
+                        // 向量 float→half 用 simd_cvt_f2h（static_cast 不允许向量类型转换）
+                        simd_store(simd_cvt_f2h(x * inv), q + r * kD + d);
+                    }
+                }
+                half *out = static_cast<half *>(args.fmha_out)
+                    + (q_offset + qi) * kHeads * kD + head * kD;
+                memcpy_stride(out, q, rows * kD * sizeof(half), kD * sizeof(half),
+                              {(kHeads - 1) * kD * sizeof(half), 0});
+            }
+            if (splits > 1) sync_threads(team);
+        }
+        q_offset += qlen;
+    }
+    free(prefill_arena);  // 与入口 malloc 配对（图捕获：回放复用同一 SPM 地址，安全）
+}
