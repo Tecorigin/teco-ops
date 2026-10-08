@@ -443,3 +443,37 @@ validation/rms_plain_writeback_20261007.json, remote commit1a0b3e77c46ebb4160df4
 Hy's preceding evidence continues to validate its earlier e29b53c SIMD source,
 not this new plain-DMA code. MiniCPM has not yet independently validated this
 new source.
+
+## MiniCPM5-1B 独立 SIMD epilogue 验证（2026-10-08）
+
+### 来源与范围
+
+本轮只验证 RMSNorm plain/add 第二遍 epilogue SIMD；没有改变 DMA overlap。候选 B 对应官方 E29 commit `e29b53c256f366e6eee538d656bfbb56e867cefc`，`teco/ual/kernel/rms_norm/rms_norm_fp16.scpp` SHA-256 `41a517c23ae849f0d36cbdb2746ea2b75e21e5f2efe4dbaf44b6ed99a62193be`。实测 B 源码快照的归档 SHA-256 为 `95b0ea93087eca250aaab7c84cba8ab776e3bcbaac3539a8cf505d49d41aa612`；它保留旧说明文档，因此不是官方 E29 Git 归档的字节哈希。源码审计对照 559 个文件：仅 `doc/op_docs/rms_norm.md` 不同，其余 558 个文件（包含全部构建源码与 kernel）逐字一致。
+
+A 是 fresh pre-SIMD 重建（kernel SHA-256 `7a8d56abe6d466c8478da73f2eb5183194d2ec8e4c5a9d354dc971caec2e6f86`），B 是上述 E29 重建；A-after 是同一 A artifact 的复测。A 的 `libteco_ops.so` / `_torch_ext` SHA-256 分别为 `7fc428538a0f01d5eeb1863a56955accc14ae52d1ee95e59fb3dd9ebc7ff6b84` / `7d02b580ed7fd023a0c46cbf63fcb45e863f32c2c0068569a404f7c553fb8c29`；B 分别为 `d26791a5c1f9d902f2449baf62c58490aafa455cab357f8b93bbc029f525da97` / `c7d4a8c02138d0742e1da46e9aff79515d75b364b02171fd0b03e34db5cc3f4b`。A 在本轮重新编译；B 重用已保存的 E29 编译产物。厂商编译器哈希和生成的 kernel/extension flags 在仅替换构建路径后相同。本轮 correctness、计时和模型门禁均在 MiniCPM 分支独立执行，没有与当前 installed `fe` 产物建立源码等价关系。
+
+### MiniCPM 实际 shape focused 数据
+
+以下为同一输入、同步 host operator-call 范围的三次原始计时与中位数，单位 ms。plain/add 原始 oracle 阈值分别为 `0.005` / `0.01`，residual 阈值为 `0.01`；四组 A、B、A-after 输出互相 bit-exact。表中 maxabs 为输出相对 oracle 的最大绝对误差。
+
+| shape / mode | A raw → median (ms) | B raw → median (ms) | A-after raw → median (ms) | maxabs A/B/A-after; residual maxabs |
+|---|---|---|---|---|
+| `[7,1536]` plain | `[0.028248949092812836, 0.028430900420062244, 0.028186451527290046]` → `0.028248949092812836` | `[0.014917951193638146, 0.014639951405115426, 0.014368450501933694]` → `0.014639951405115426` | `[0.027924400637857616, 0.027848451281897724, 0.02764240198303014]` → `0.027848451281897724` | `0.001953125 / 0.001953125 / 0.001953125`; N/A |
+| `[7,1536]` add | `[0.03762540000025183, 0.03784035216085613, 0.037831399822607636]` → `0.037831399822607636` | `[0.022109400015324354, 0.02192544925492257, 0.02228095254395157]` → `0.022109400015324354` | `[0.03723940171767026, 0.03695889899972826, 0.036988899228163064]` → `0.036988899228163064` | `0.001953125 / 0.001953125 / 0.001953125`; `0 / 0 / 0` |
+| `[1,1536]` plain | `[0.028349951026029885, 0.028247400769032538, 0.028084401856176555]` → `0.028247400769032538` | `[0.02112494839821011, 0.021648401161655784, 0.021263951202854514]` → `0.021263951202854514` | `[0.027334451442584395, 0.028128898702561855, 0.0281904503935948]` → `0.028128898702561855` | `0.0009765625 / 0.0009765625 / 0.0009765625`; N/A |
+| `[1,1536]` add | `[0.03724489943124354, 0.03703740076161921, 0.037555399467237294]` → `0.03724489943124354` | `[0.022344948956742883, 0.022114950115792453, 0.022939449991099536]` → `0.022344948956742883` | `[0.03730239986907691, 0.03716589999385178, 0.03713690093718469]` → `0.03716589999385178` | `0 / 0 / 0`; `0 / 0 / 0` |
+
+按四组中位数计算，A→B 的同步 host operator-call 时间下降 `24.72%–48.18%`；四组中 B 的每次原始计时也都快于 A 与 A-after。该范围只描述本 focused operator-call 测量，不代表纯设备 kernel 时间、模型吞吐或端到端加速。
+
+### 模型级验证状态
+
+使用本分支公开 `run.sh`，TP1、FP16、context 2048、official attention 与已接入的 vendor SwiGLU。A/B 各两次固定 prompt 贪婪生成的完整 32 个 token ID 均匹配本模型的 `validation/baseline_token_ids.json`。实际默认编译为 mode3/backend=eager/CUDAGraphMode.NONE，enforce_eager=false；49 个 TecoopsRMSNorm 权重均为 SDAA FP16、D1536、epsilon1e-6，core 的唯一实际映射与导入 extension 的路径/哈希分别匹配上方 A/B 哈希。
+
+warmup3 后模型请求墙钟三次原值：A `[2439.6632940042764, 2468.2493879809044, 2416.493065014947]`，中位数 `2439.6632940042764` ms；B `[2418.1028910097666, 2396.589677024167, 2412.7150650019757]`，中位数 `2412.7150650019757` ms。本次中位数差约 1.10%，不作为稳定模型加速结论。
+
+B 稳态 `301.92812288494315` 秒、`110` 次请求全部匹配完整 greedy32 参考；观测的 allocator delta/slope 均为 0。两臂请求窗口 peak allocated/reserved 为 `13868604928 / 14969470976` bytes。独占逻辑设备 1 的测试窗口 teco-smi 采样为 `14532` MB，未获得 host PID 与容器 PGID 的直接映射，因此它只提供独占设备测试窗口的显存证据，不能等同于 Torch allocator 或精确 PGID 归属。自有服务进程组已停止，设备释放。
+
+最终公开 focused 脚本 8/8 通过原阈值，源码和 shell/Python 语法、初始化 fail-closed 与 diff-check 通过。首次模型启动的 CPU-only 环境变量泄漏错误保留原始日志；修复仅作用于测试驱动的子环境，未改变 SDK、模型、oracle 或 compiler 配置。
+
+独立复现、完整原值与限制记录在 [MiniCPM 模型 PR4](https://github.com/Tecorigin/tecovllm-modelzoo/pull/4) 的 `model_adaptations/MiniCPM5SCUdoudui/validation/rms_epilogue_simd_20261008.json`。当前官方 CI、py311、组委会精度、长上下文及所有 open PR 的组合 wheel 均未运行。
+- 本段覆盖 E29 SIMD ancestor，不代表当前 PR37 kernel `93e8e80d08d401fffaa3060bf8e6e24bd989ab59fd8cb09c079228710f66d5b7`（InternVL DMA）已在 MiniCPM 验证。MiniCPM 本轮 DMA 候选为 NO-GO，未纳入本实验。
