@@ -268,6 +268,9 @@ InternVL's independent proof and reproducible minimal source patch are
 published in the InternVL model PR validation folder.
 
 
+
+Historical table scope correction (2026-10-08): q/k rows57952/14488 and139264/34816 use global head counts. They are boundary/stress shapes, not actual TP2 per-rank inputs. Hidden4096 rows are unaffected. Original measurements remain unchanged; current per-rank shapes are independently measured in the plain-DMA section below.
+
 | Shape /mode | Baseline ms/call (three raw values) | Candidate ms/call (three raw values) | Median baseline →candidate |
 | --- | --- | --- | --- |
 | [1,4096] /plain | [0.066113798,0.067154894,0.067022804] | [0.025885901,0.025573000,0.025548902] | 0.067022804 →0.025573000 |
@@ -363,3 +366,80 @@ attention evidence is historical, not a fresh epilogue steady test. This
 epilogue-only work does not change attention/cache/communication. Current
 head official CI/full wheel, official py311, full8192 request and committee
 accuracy were not run. No whole-model or stable host wall speedup is claimed.
+
+## InternVL plain output DMA wait overlap (validated2026-10-07; published2026-10-08)
+
+The plain FP16 kernel keeps each output buffer owned by its DMA until the
+existing same-buffer reuse wait. It removes the immediate post-store wait and
+drains both output handles before freeing SPM. Idle handles start reply/counter
+0/0 and their wait is valid. Input/output buffers are distinct. Compute, epsilon,
+FP32 reduction/order, SIMD pack, current-stream binding and ABI are unchanged.
+The add path stays byte-identical because its residual prefetch may overwrite
+the store source. No extra allocation or backend branch is added.
+
+Atomic source delta applies to e29b53c/2949f70, on official main
+de27305efed0a17ae926d21d5415d8b915614649. Kernel SHA256
+41a517c23ae849f0d36cbdb2746ea2b75e21e5f2efe4dbaf44b6ed99a62193be →
+93e8e80d08d401fffaa3060bf8e6e24bd989ab59fd8cb09c079228710f66d5b7. U0 patch
+1408340f6b04fc98187d41c5da2095d1782d65e2bcb54a424121815eed811424 reconstructs the tested source exactly.
+All559 regular source files were compared; only this kernel changed and binding
+source is unchanged. Candidate core ed1358d69, extension e34873d80; accepted E29
+core d26791a5/extension c7d4a8c0. These are distinct built artifacts; controls
+and A-after are retained to avoid short-shape/compiler timing attribution.
+
+Original focused32 plus4 output-reuse stress plus12 real-TP2 records pass48/48;
+candidate and A-after outputs/residuals are bitwise equal to E29. Original CPU
+limits .005 plain/.01 add and residual remain. CPU residual bit differences are
+reported, not relabeled as exact CPU equality. Default/nondefault streams,
+inputs, Fake shape128/4096 and8 real fullgraph backend=eager comparisons per
+arm pass. This is structural graph testing, not SDAA device graph capture.
+
+Live36 attention modules per worker confirm TP2 heads16/4,D128 and q/k norm
+weights[128],FP16,epsilon1e-6 on each SDAA device. Historical q57952/k14488
+(and q139264/k34816) were global-head boundary tests; they are not the per-rank
+TP2 shapes. Their original values stay unchanged. The target per-rank matrix
+below uses q28976/k7244 at1811 and q69632/k17408 at4352.
+
+Timer is perf_counter with synchronize around the call loop: Python/dispatch
+are included. FP16,seed20261007,device1,warmup5,10calls/trial and3trials are
+fixed; these are synchronized operator-call measurements, not event-only
+device-kernel times.
+
+| Plain shape | A-before three ms/call | Candidate three ms/call | A-after three ms/call | Median A-before / candidate / A-after ms |
+| --- | --- | --- | --- | --- |
+| [1811, 4096] | [1.061081403, 1.061447401, 1.059555303] | [1.042137400, 1.042557397, 1.042520400] | [1.061078400, 1.060778298, 1.061361399] | 1.061081403 / 1.042520400 / 1.061078400 |
+| [4352, 4096] | [2.518270799, 2.518669702, 2.517678798] | [2.478351799, 2.474988898, 2.475429798] | [2.518803801, 2.517313702, 2.518282796] | 2.518270799 / 2.475429798 / 2.518282796 |
+| [28976, 128] | [0.711986300, 0.711632305, 0.710182299] | [0.619505503, 0.619515497, 0.617560500] | [0.711528305, 0.711147301, 0.711093302] | 0.711632305 / 0.619505503 / 0.711147301 |
+| [7244, 128] | [0.182422501, 0.183323602, 0.183632498] | [0.160160603, 0.161574600, 0.160954602] | [0.183589599, 0.182428496, 0.183445599] | 0.183323602 / 0.160954602 / 0.183445599 |
+| [69632, 128] | [1.696930901, 1.697163895, 1.697336999] | [1.474340499, 1.473846496, 1.473919401] | [1.698199904, 1.697528898, 1.697893901] | 1.697163895 / 1.473919401 / 1.697893901 |
+| [17408, 128] | [0.430042000, 0.430427998, 0.430921902] | [0.374581100, 0.374914100, 0.374543096] | [0.430993002, 0.429889001, 0.429971900] | 0.430427998 / 0.374581100 / 0.429971900 |
+
+The measured long plain hidden calls improve1.70–1.75% and per-rank Q/K calls
+12.20–13.19% against A-before/A-after. No short-shape improvement is claimed;
+unchanged add controls also move and short hidden8 has a small negative
+observation. All36 matrices/control raw triples are in the own public proof.
+
+The unchanged public TP2/FP16/context4352 launcher passes own text/image
+greedy32 before/after this change,2warmup sets+3timed sets. Candidate additionally
+passes16 steady rounds over317.156770s. Workers
+prove145 selected RMS modules/rank and the unique candidate DSO maps; per-worker
+startup/request-window peaks are retained. HTTP model timing:
+
+| Fixed input | Baseline seconds (three raw) | Candidate seconds (three raw) | Median baseline / candidate seconds |
+| --- | --- | --- | --- |
+| text_0 | [6.465096010, 6.467103455, 6.470622017] | [6.466311547, 6.477757190, 6.470496897] | 6.467103455 / 6.470496897 |
+| text_1 | [6.468929351, 6.467297265, 6.467069926] | [6.463382384, 6.462565117, 6.466762146] | 6.467297265 / 6.463382384 |
+| image | [6.753588631, 6.754539259, 6.750168019] | [6.749954160, 6.750640298, 6.751550106] | 6.753588631 / 6.750640298 |
+
+Model latency is effectively unchanged; no end-to-end speedup claim. The
+metadata-only restart confirms head attributes and supplies no new generation
+or performance evidence. Vendor-Python AST/shell syntax, U0 source reconstruction
+and git diff --check pass. Current-head official CI/full wheel,official py311,
+committee accuracy and new long-input accuracy were not run. The existing odd-D
+4B HAL alignment limitation is unchanged.
+
+Own public source/proof: InternVL model PR6,
+validation/rms_plain_writeback_20261007.json, remote commit1a0b3e77c46ebb4160df413101049f31db38f11e.
+Hy's preceding evidence continues to validate its earlier e29b53c SIMD source,
+not this new plain-DMA code. MiniCPM has not yet independently validated this
+new source.

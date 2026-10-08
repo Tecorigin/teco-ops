@@ -133,7 +133,6 @@ __global__ void teco_slave_rms_norm_fp16(RmsNormArgs args) {
         // 6d. 发起写回 + 等待完成
         memcpy_async(output_hbm + offset + r * D, CDBUF(out),
                      row_bytes, MemcpySpmToGlobal, put_handle[buf_dbflag]);
-        memcpy_wait(put_handle[buf_dbflag]);
 
         // 6e. 交换 buffer
         if (r + 1 < my_rows) {
@@ -141,6 +140,9 @@ __global__ void teco_slave_rms_norm_fp16(RmsNormArgs args) {
         }
     }
 
+    // Drain output DMA before freeing its SPM source. Unused handles are idle.
+    memcpy_wait(put_handle[0]);
+    memcpy_wait(put_handle[1]);
     rt_spm_free(spm_base);
 }
 
