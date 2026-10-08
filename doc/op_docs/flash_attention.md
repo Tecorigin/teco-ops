@@ -257,103 +257,30 @@ tecoops.flash_attn_varlen_func(
 )
 ```
 
-### D512 SV accumulation SIMD verification (2026-10-07)
+## D512 SIMD 机制与独立验证
 
-Only the BM32 specialization replaces the scalar Step E FP32 additions with
-two `floatv16` additions per 32-column SV chunk. Per-element addition order,
-rescale, softmax, probability packing, DMA, ABI and the BM64/BM128 paths stay
-the same. Selection is compile-time; no forward-time backend switch is added.
+BM32/D512 的 Step B 用 `floatv16` 逐元素重缩放 FP32 累加器，Step E 用
+`floatv16` 累加 SV。两项机制分别验证；逐元素数学顺序、softmax、FP16
+packing、DMA、SPM 分配和 ABI 保持原实现。BM64/BM128 保留标量路径，
+特化在编译期选择。
 
-The paired measurement baseline is the combined PR36/41/42 Gemma source on
-official main `de27305efed0a17ae926d21d5415d8b915614649`. This PR's new kernel
-delta is independently applicable to PR41 head `5584d46`; the combined source
-is disclosed because the model also needs the other compatibility fixes.
-Vendor Python resolves to `/usr/local/python/bin/python3.12`; SDK/runtime3.2.0,
-Torch2.12.0a0+0d62256 and Torch-SDAA20260623.8.51+d942f23 were used.
+Gemma 独立测试使用 FP16 Q[N,8,512]、KV[blocks,1,32,512]、scale=1、
+N=1/4/8、KV=33..4352。每项均通过 80 个 paired decode 和 8 个 paired
+prefill 用例：与各自基线 bitwise 相同，CPU 容差保持 0.02，输入/cache
+不变；默认/非默认 stream、4352 边界和毒化尾部均通过。各自的 TP2/FP16
+固定 greedy32 回归与超过 300 秒稳态测试也通过。
 
-FP16 Q[N,8,512], KV[blocks,1,32,512], scale1, one logical device2, seed20261007,
-warmup5 and10 calls per trial. Each bracket contains all three ms/call values.
+同输入、warmup5、10 calls/trial、连续三轮的同步 operator-call 计时中，
+长 KV 的 Step E 延迟下降 3.11%–3.32%，Step B 再下降 3.74%–3.84%。
+全部三次原值、A-after、median、shape、构建哈希和 worker 收据分别保存在
+[Step E 证明](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3746150cb6d78e7154de5046d56f0189bf3dcb82/model_adaptations/Gemma4SCUdoudui/validation/d512_accumulate_simd_20261007.json)
+和 [Step B 证明](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3746150cb6d78e7154de5046d56f0189bf3dcb82/model_adaptations/Gemma4SCUdoudui/validation/d512_rescale_simd_20261007.json)。
+短 KV 计时范围重叠，模型顺序计时存在漂移，均不作为稳定端到端模型加速结论。
 
-| N / KV lengths | Baseline ms | Candidate ms | Median baseline → candidate ms |
-| --- | --- | --- | --- |
-| 1 /33 | [0.242017402,0.243326405,0.240724400] | [0.240233395,0.238871400,0.239240401] | 0.242017402 →0.239240401 |
-| 1 /4352 | [10.584034101,10.588059103,10.587743099] | [10.239770997,10.245721001,10.289950797] | 10.587743099 →10.245721001 |
-| 4 /33,65,1025,4352 | [13.557968498,13.639971300,13.569197600] | [13.118165702,13.117788697,13.125886599] | 13.569197600 →13.118165702 |
-| 8 /33,65,1025,4097,4320,4352,65,4097 | [44.135197904,44.132023799,44.195023697] | [42.701129499,42.771772301,42.764305399] | 44.135197904 →42.764305399 |
-
-The80 paired decode rows and8 paired prefill rows are bitwise equal to their
-independent baseline. Prefill Q2/33/64/128 spans KV33/65/1025/4352; original
-reference tolerance .02, default/nondefault streams and cache preservation
-are retained. The public opaque/fullgraph-eager,4352-boundary and poisoned-tail
-focused checks also pass. Candidate core SHA256 is
-`e88dd5c34e6cee2bec005dfb5b8696a555e48d83c6c68be2dffc25e3e37f47a8`.
-
-Own Gemma TP2/FP16/context4352 fixed greedy32 matches on83 candidate requests,
-including65 steady requests over318.317824s. A→B→A model raw seconds are
-[13.562570464,13.465909750,13.543346152] /
-[12.748440575,12.935509947,12.962619586] /
-[13.004446402,12.935581907,12.969123281]. The final baseline overlaps the
-candidate, so no end-to-end speedup is claimed. This is not full official
-wheel/CI,official py311 or final committee accuracy evidence. The source and
-worker/peak evidence are published in the Gemma model PR's
-`validation/d512_accumulate_simd_20261007.json`.
-
-Public SIMD source reproduction: use the Gemma model PR public package at
-model_adaptations/Gemma4SCUdoudui. In a fresh checkout of official main
-de27305efed0a17ae926d21d5415d8b915614649, apply its archived
-op_learning/attention/gemma-d512-model/official_combined.patch with
-git apply --check --unidiff-zero and then git apply --unidiff-zero.
-The public build helper produces local library provenance for that exact
-source; this patch includes the disclosed PR36/41/42 combination.
-Its checksum is 5308055b25e87d217574561f4e9545f36d2e779092d83c7d3bcc305176995ca7.
-The isolated validated build is tied to this source and its own worker
-receipts; a newly built or installed vendor wheel requires its own gates.
-
-### D512 accumulator rescale SIMD verification (2026-10-07)
-
-The additional atomic mechanism changes only BM32 Step B: each FP32 accumulator
-element is multiplied by the same row scale using floatv16 load/multiply/store.
-Earlier Step E additions, softmax/rounding order, packing, DMA, tile sizes, SPM
-allocation and ABI retain their previous behavior. BM64/BM128 use the previous
-scalar rescale. Selection is compile-time.
-
-Independent hardware baseline is the prior accepted Step E combination on
-official main `de27305efed0a17ae926d21d5415d8b915614649`, core e88dd5c34; this
-new mechanism applies exactly to PR41 head5b8f65f. The model's isolated combined
-build also contains PR36/42 compatibility bindings. Fresh candidate source
-SHA256 `2630b68c14df8285bad0d1dd4f1bcc14fb77c124fc32c7d5dc3ce2e74d74b352` and core SHA256
-`d61208eeba2362714f9aab67d74d8f3dd9e57121991c90f0b5a17f62ee0fe4ef` are recorded separately from the unchanged
-Torch extension c727f57f. Vendor Python realpath is
-`/usr/local/python/bin/python3.12`; SDK/runtime3.2.0, Torch2.12.0a0+0d62256,
-Torch-SDAA20260623.8.51+d942f23.
-
-Own paired decode80 and prefill8 rows are bitwise equal to baseline, with
-original .02 reference tolerance, exact input/cache preservation, default and
-nondefault streams. Ordinary/fullgraph-eager,4352-boundary and poisoned-tail
-gates pass. FP16 Q[N,8,512], KV[blocks,1,32,512], scale1, device2, seed20261007,
-warmup5 and10 calls/trial are fixed across three micro runs:
-
-| N / KV lengths | Baseline three ms/call values | Candidate three ms/call values | Median baseline → candidate ms |
-| --- | --- | --- | --- |
-| 1 / 33 | [0.243227498, 0.244031404, 0.245578500] | [0.243547495, 0.243287499, 0.241812400] | 0.244031404 → 0.243287499 |
-| 1 / 4352 | [10.242068500, 10.248963395, 10.316291201] | [9.855969297, 9.855175199, 9.856668301] | 10.248963395 → 9.855969297 |
-| 4 / 33,65,1025,4352 | [13.125246100, 13.113395998, 13.116348104] | [12.621673202, 12.612573203, 12.612844200] | 13.116348104 → 12.612844200 |
-| 8 / 33,65,1025,4097,4320,4352,65,4097 | [42.709624901, 42.696079897, 42.764923704] | [41.114962404, 41.076609504, 41.112411401] | 42.709624901 → 41.112411401 |
-
-Long-KV micro latency decreases3.74–3.84%; the post-candidate baseline retains
-medians10.241912602 /13.111219398 /42.709663801ms for the three long cases.
-The short KV33 triples overlap, so no short-case improvement is claimed.
-The complete A-after triples and all focused cases are in the model proof.
-
-Own public TP2/FP16/context4352/chunk512 configuration matches32-token IDs
-on83 candidate requests, including65 requests over
-313.616906s. Actual workers retain the selected DSO
-mapping, eight D512 layer bindings and memory peaks. Baseline/candidate model raw seconds: [13.565518133, 13.524816754, 13.467264207] / [13.376095781, 13.331312942, 13.374056167]; medians 13.524816754 / 13.374056167. Ordered model runs are regression evidence; no end-to-end speedup is claimed.
-
-Provenance tests6/6, vendor-Python syntax, shell syntax and diff-check pass.
-Published U0 combined patch `9756790105110f8fd4ed610d8e12c9269d2992a331fb8a0a530134204b3b7600` reconstructs
-byte-identical tested source. Source/proof: Gemma model PR3,
-`validation/d512_rescale_simd_20261007.json`. Current-head official CI/full
-wheel, official py311, final committee accuracy and new long-input model tests
-were not executed. Earlier CI/review and accuracy records retain their original
-head/build scope.
+实测 isolated Gemma 构建还包含 PR36/42 的兼容绑定；它与本 PR 的独立
+kernel 差异分别留证。复现入口和固定官方 main 基线见
+[Gemma README](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3746150cb6d78e7154de5046d56f0189bf3dcb82/model_adaptations/Gemma4SCUdoudui/README.md)，
+完整补丁见 [official_combined.patch](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3746150cb6d78e7154de5046d56f0189bf3dcb82/model_adaptations/Gemma4SCUdoudui/op_learning/attention/gemma-d512-model/official_combined.patch)。
+[官方定向 CI](https://github.com/Tecorigin/teco-ops/pull/41#issuecomment-6041987041)
+通过的 head 是 `cb7e7732b81b01eb5c5330459d3ab5c130185ceb`；后续文档
+提交保留该 kernel。完整组合 wheel、官方模型环境与组委会完整精度仍需验证。
