@@ -258,6 +258,11 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 {
                     floatv16 vscale = args.softmax_scale;
                     int total = BM * BN;
+                    if constexpr (BM == 32) {
+                        // D512/BM32: only the cur_BM observed query rows are ever read back
+                        // (Step A/B/E, normalize, output DMA are all cur_BM scoped).
+                        total = cur_BM * BN;
+                    }
                     int si = 0;
                     for (; si <= total - 16; si += 16) {
                         floatv16 v;
@@ -302,6 +307,10 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 // Step C: float->half: outc -> p_score (独立buffer, 非ktmp, 避免head_size=64越界)
                 {
                     int total = BM * BN;
+                    if constexpr (BM == 32) {
+                        // D512/BM32: rows >= cur_BM only feed P@V rows that are discarded.
+                        total = cur_BM * BN;
+                    }
                     int si = 0;
                     for (; si + 16 <= total; si += 16) {
                         floatv16 vf;
