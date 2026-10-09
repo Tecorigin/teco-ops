@@ -172,6 +172,15 @@ tecoopsFlashAttention参数信息
 | 算法取值           | 计算分支                            | 含义说明                            |
 | ------------------ | ----------------------------------- | ----------------------------------- |
 | `TECOOPS_ALGO_0` | `teco_slave_flash_attention_half` | 基础实现，half 精度，单 SPE 单 head |
+| `TECOOPS_ALGO_1` | `teco_slave_flash_attention_prefill` | gemm32 融合优化实现（P1 转置读侧向量化 + P2 两 n 块融合，stretch:mul 1:2→1:4 广播开销减半）。支持域：fp16 且 `size_per_head == 128` 且 `block_size == 32`（M128_N32 分块，BN 与物理 cache 页一致）；域外自动回退 ALGO_0 |
+
+### P1+P2 优化设计补充（ALGO_1）
+
+**P1 K 转置读侧向量化**：K 转置段的读侧采用连续行 `halfv16` 向量化读入（读侧 16× 向量化；写侧保持散写 packed 列——转置本质读写一侧必散）。
+
+**P2 两 n 块融合**：kN==32 特化路径下，k 步内一次 stretch 服务相邻两个 n 块共 8 条 FMA（stretch:mul 比由 1:2 优化至 1:4，广播开销减半）；非 32 形态走原路径保正确性。与 P1 正交可叠加。
+
+实测（MiniCPM5-1B 服务形态，token-true 四档 10 请求/档 1% 分位）：TTFT 合计 35.30s vs 基线 42.98s = **-17.9%**；TPOT 持平（提升集中于 prefill 段）；质量探针与官方口径 200 题复测带内（0.28）。证据：PR 描述与 verification/ 归档。
 
 ## 文件结构
 

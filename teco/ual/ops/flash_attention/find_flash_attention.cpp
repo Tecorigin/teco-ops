@@ -27,6 +27,7 @@
 // #include "ual/ops/ops_com/discriptor_finder.h"
 #include "ual/ops/flash_attention/find_flash_attention.h"
 #include "ual/kernel/flash_attention/flash_attention.h"
+#include "ual/kernel/flash_attention/flash_attention_prefill.h"
 #include "ual/com/log.h"
 
 namespace tecoops {
@@ -37,8 +38,18 @@ using tecoops::ual::args::FlashAttentionPatchArgs;
 
 
 int findFlashAttentionBranch(const FlashAttentionPatchArgs *args) {
+    // algo 00: teco_slave_flash_attention_half (reference, any layout)
+    // algo 01: teco_slave_flash_attention_prefill (gemm32-fused P1+P2 variant)
+    //          support domain: fp16, size_per_head == 128, block_size == 32
+    //          (M128_N32 tiling; BN must equal the physical cache page size).
+    //          Outside this domain fall back to the reference kernel.
     int algo = 0;
-    // teco_slave_flash_attention_half
+    if (args != nullptr && args->rvargs != nullptr) {
+        const bool half_type = (args->data_type == tecoops::ual::common::UAL_DTYPE_HALF);
+        if (half_type && args->rvargs->size_per_head == 128 && args->rvargs->block_size == 32) {
+            algo = 1;  // teco_slave_flash_attention_prefill
+        }
+    }
     return algo;
 }
 

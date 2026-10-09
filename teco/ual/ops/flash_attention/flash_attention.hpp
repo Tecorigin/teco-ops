@@ -30,6 +30,7 @@
 #include "ual/ops/base_op.hpp"
 #include "ual/com/log.h"
 #include "ual/kernel/flash_attention/flash_attention.h"
+#include "ual/kernel/flash_attention/flash_attention_prefill.h"
 #include "ual/ops/flash_attention/find_flash_attention.h"
 
 namespace tecoops {
@@ -51,12 +52,16 @@ struct FlashAttentionType {
 static const FlashAttentionType::PImplType FlashAttentionAlgos[] = {
     /* 00 */
     teco_slave_flash_attention_half,
+    /* 01 */
+    teco_slave_flash_attention_prefill,
 };
 
 // array of strings describied the names of reduce variance operator algorithm
 static const char *FlashAttentionAlgosDiscription[] = {
     /* 00 */
     "teco_slave_flash_attention_half",
+    /* 01 */
+    "teco_slave_flash_attention_prefill",
 };
 struct FlashAttentionOp : public BaseOp<FlashAttentionOp, FlashAttentionType> {
  public:
