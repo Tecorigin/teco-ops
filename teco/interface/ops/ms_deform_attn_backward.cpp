@@ -41,6 +41,17 @@ using tecoops::ual::ops::MsDeformAttnBackwardOp;
 using tecoops::ual::ops::MsDeformAttnBackwardCastOp;
 using tecoops::ual::ops::MsDeformAttnBackwardZeroOp;
 
+namespace {
+// 形状自适应调度阈值。work 定义见下方 List 入口：batch * num_queries * num_heads *
+// num_levels * num_points。小工作量时 Average Hardware Time 由 kernel 启动开销主导
+// （2026-10-09 实测官方 case_0 = 6.09 us ≈ 一次 ~6.07 us 的 launch 地板），
+// 走 2-launch legacy atomic 路径可省去 list_init / list_reduce 两次 launch；
+// 大工作量时保持 3-launch list 路径（真实 shape 下减少 launch 数无意义，
+// 而历史模型级证据显示 atomic/CAS 变体在真实 shape 反而慢 1.64-3.5x）。
+// 官方 case_0 的 work = 1*2*1*1*2 = 4；内部多尺度真实 shape 的 work = 5,689,088。
+constexpr int64_t kMsdaAtomicDispatchWorkThreshold = 10000;
+}  // namespace
+
 tecoopsStatus_t tecoopsMsDeformAttnBackward(
     tecoopsHandle_t handle,
     const void *value,
@@ -125,6 +136,16 @@ tecoopsStatus_t tecoopsMsDeformAttnBackwardList(
         !tecoops::msdaListCount({batch, value_len, num_heads}, &head_count) ||
         !tecoops::msdaListCount({4, batch, num_queries, num_heads, num_levels, num_points}, &node_count)) {
         return TECOOPS_STATUS_BAD_PARAM;
+    }
+    // 形状自适应调度：在入口一次性绑定实现，kernel 热路径不留运行期分支（AGENTS.md 规则 6）。
+    const int64_t dispatch_work = static_cast<int64_t>(batch) * num_queries * num_heads *
+                                  num_levels * num_points;
+    if (dispatch_work < kMsdaAtomicDispatchWorkThreshold) {
+        return tecoopsMsDeformAttnBackward(handle, value, spatial_shapes, sampling_locations,
+                                          attention_weights, grad_output, grad_value,
+                                          grad_value_fp16, grad_locations, grad_weights, batch,
+                                          value_len, num_heads, head_dim, num_queries, num_levels,
+                                          num_points, data_type, algo);
     }
     MsDeformAttnBackwardArgs arg{};
     arg.spe_num = handle->spe_num;
