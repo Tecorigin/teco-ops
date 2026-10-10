@@ -216,6 +216,20 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                     qbuf[r] = 0;
                 }
             }
+
+            // NT form (BM == 32 only): build the transposed query block Q^T [BK, BM] once per Q
+            // block so the per-KV-tile K staging transpose below disappears - the matmul takes
+            // A = ktmp directly and B = Q^T, and the score tile comes out transposed.  kbuf is
+            // free here (the K transpose it used to hold is skipped for BM == 32) and the PV
+            // staging moves to ktmp, which the NT GEMM has already consumed.
+            if constexpr (BM == 32) {
+                for (int r = 0; r < cur_BM; r++) {
+                    const half *qrow = qbuf + r * args.size_per_head;
+                    for (int h = 0; h < BK; h++) {
+                        kbuf[h * BM + r] = qrow[h];
+                    }
+                }
+            }
     
             for (int j = 0; j < k_seq_len; j += BN) {
                 int cur_BN = MIN(BN, k_seq_len - j);
@@ -227,29 +241,31 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                               kv_head_idx , args.local_kv_head_num, args.block_size,
                               args.size_per_head, cur_BN);
 
-                // PROBE: same permutation, h-outer so the kbuf side is a contiguous
-                // halfv16 store instead of a stride-BN scalar scatter.
-                for (int h = 0; h < args.size_per_head; h++) {
-                    half *dst_row = kbuf + h * BN;
-                    int t = 0;
-                    for (; t <= cur_BN - 16; t += 16) {
-                        halfv16 v;
-                        half *vp = (half *)&v;
-                        for (int u = 0; u < 16; u++) {
-                            vp[u] = ktmp[(t + u) * args.size_per_head + h];
-                        }
-                        simd_store(v, dst_row + t);
-                    }
-                    for (; t < cur_BN; t++) {
-                        dst_row[t] = ktmp[t * args.size_per_head + h];
-                    }
-                }
-
-                // clear unused columns of kbuf (cur_BN < BN)
-                if (cur_BN < BN) {
+                if constexpr (BM != 32) {
+                    // PROBE: same permutation, h-outer so the kbuf side is a contiguous
+                    // halfv16 store instead of a stride-BN scalar scatter.
                     for (int h = 0; h < args.size_per_head; h++) {
-                        for (int c = cur_BN; c < BN; c++) {
-                            kbuf[h * BN + c] = 0;
+                        half *dst_row = kbuf + h * BN;
+                        int t = 0;
+                        for (; t <= cur_BN - 16; t += 16) {
+                            halfv16 v;
+                            half *vp = (half *)&v;
+                            for (int u = 0; u < 16; u++) {
+                                vp[u] = ktmp[(t + u) * args.size_per_head + h];
+                            }
+                            simd_store(v, dst_row + t);
+                        }
+                        for (; t < cur_BN; t++) {
+                            dst_row[t] = ktmp[t * args.size_per_head + h];
+                        }
+                    }
+
+                    // clear unused columns of kbuf (cur_BN < BN)
+                    if (cur_BN < BN) {
+                        for (int h = 0; h < args.size_per_head; h++) {
+                            for (int c = cur_BN; c < BN; c++) {
+                                kbuf[h * BN + c] = 0;
+                            }
                         }
                     }
                 }
@@ -258,21 +274,44 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 {
                     MatmulConfig matmul_cfg;
                     Matmul matmul(matmul_cfg);
-                    int gemm_m = BM;
-                    if constexpr (BM == 32 || BM == 128) {
-                        gemm_m = cur_BM;
-                    }
-                    auto tensorQ = make_tensor<2>((half *)qbuf,
-                        {static_cast<size_t>(gemm_m), static_cast<size_t>(args.size_per_head)});
-                    auto tensorK = make_tensor<2>((half *)kbuf,
-                        {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
-                    auto tensorC = make_tensor<2>((float *)outc,
-                        {static_cast<size_t>(gemm_m), static_cast<size_t>(BN)});
+                    if constexpr (BM == 32) {
+                        // NT form: A = the K tile itself (contiguous [cur_BN, BK], no staging
+                        // transpose), B = Q^T [BK, BM] built once per Q block; C is S^T
+                        // [cur_BN, BM] and is flipped back into S [cur_BM, BN].
+                        float *st = (float *)obuf;
+                        auto tA = make_tensor<2>((half *)ktmp,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BK)});
+                        auto tB = make_tensor<2>((half *)kbuf,
+                            {static_cast<size_t>(BK), static_cast<size_t>(BM)});
+                        auto tST = make_tensor<2>((float *)st,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BM)});
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                            tA, tB, /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tST);
+                        matmul.wait_storeC(1);
+                        for (int t = 0; t < cur_BN; t++) {
+                            for (int r = 0; r < cur_BM; r++) {
+                                outc[r * BN + t] = st[t * BM + r];
+                            }
+                        }
+                    } else {
+                        int gemm_m = BM;
+                        if constexpr (BM == 128) {
+                            gemm_m = cur_BM;
+                        }
+                        auto tensorQ = make_tensor<2>((half *)qbuf,
+                            {static_cast<size_t>(gemm_m),
+                             static_cast<size_t>(args.size_per_head)});
+                        auto tensorK = make_tensor<2>((half *)kbuf,
+                            {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
+                        auto tensorC = make_tensor<2>((float *)outc,
+                            {static_cast<size_t>(gemm_m), static_cast<size_t>(BN)});
 
-                    matmul.compute_async<MatmulBlockConfig::M128_N32>(
-                        tensorQ, tensorK, /*is_lastk=*/true);
-                    matmul.storeC_spm_async(tensorC);
-                    matmul.wait_storeC(1);
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                            tensorQ, tensorK, /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tensorC);
+                        matmul.wait_storeC(1);
+                    }
                 }
 
                 // simd mul softmax_scale
@@ -360,6 +399,11 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                     + kv_head_idx  * args.block_size * args.size_per_head;
 
                 half * vbuf = kbuf;
+                if constexpr (BM == 32) {
+                    // The NT GEMM above already consumed the K tile, so the PV staging can reuse
+                    // ktmp and leave kbuf (which holds Q^T) intact across KV tiles.
+                    vbuf = ktmp;
+                }
                 float * outO = outc;            // reuse outc
                 int gemm_bn = 32;
                 for (int hb = 0; hb < BK / gemm_bn; hb++) {
