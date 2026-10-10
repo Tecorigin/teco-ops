@@ -41,6 +41,30 @@ using namespace tecoops::ual::args;  // NOLINT
 using namespace teco::hal;            // NOLINT
 using namespace sdaa;                 // NOLINT
 
+// H2a: shared RMSNorm second-pass epilogue (widened input -> two ordered fp32 multiplies ->
+// narrow).  Extracted from the accepted inline bodies verbatim so that the only change in this
+// attempt is the first-pass row-level pipelining.
+__device__ __always_inline void rms_norm_epilogue(const half *src, const half *weight, half *dst,
+                                                  float rstd, int D) {
+    int d = 0;
+    const floatv16 rstd_vec = simd_vcpyfs(rstd);
+    for (; d + 16 <= D; d += 16) {
+        float16v16 input_half, weight_half;
+        simd_loadu(input_half, src + d);
+        simd_loadu(weight_half, weight + d);
+        const floatv16 input_vec = simd_vfcvths(input_half);
+        const floatv16 weight_vec = simd_vfcvths(weight_half);
+        const floatv16 scaled = input_vec * rstd_vec;
+        const floatv16 weighted = scaled * weight_vec;
+        const float16v16 output_half = simd_vfcvtsh(weighted);
+        simd_storeu(output_half, dst + d);
+    }
+    for (; d < D; ++d) {
+        float val = static_cast<float>(src[d]) * rstd * static_cast<float>(weight[d]);
+        dst[d] = static_cast<half>(val);
+    }
+}
+
 // 双缓冲宏 (参考 reduce_variance_axis_right_float.scpp)
 #define CDBUF(x) (buf_dbflag == 0 ? x##0 : x##1)
 #define ADBUF(x) (buf_dbflag == 0 ? x##1 : x##0)
@@ -68,66 +92,101 @@ __global__ void teco_slave_rms_norm_fp16(RmsNormArgs args) {
     int my_rows = static_cast<int>(block[0]);
     if (my_rows == 0) return;
 
-    // Step 3: SPM 分配 (in0/in1/out0/out1/weight)
+    // Step 3: SPM 分配 (in[0..3] / out0 / out1 / weight)
+    // H2a: two rows in flight -> two input pairs resident (4 rows) so the next pair's HBM
+    // prefetch can be issued before the current pair's reduce.
     const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
-    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 5));
+    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 7));
     half *in0   = spm_base;
     half *in1   = in0 + D;
-    half *out0  = in1 + D;
+    half *in2   = in1 + D;
+    half *in3   = in2 + D;
+    half *out0  = in3 + D;
     half *out1  = out0 + D;
     half *weight = out1 + D;
+    half *inbuf[4] = {in0, in1, in2, in3};
+    half *outbuf[2] = {out0, out1};
 
-    MemcpyHandle get_handle[2];
-    MemcpyHandle put_handle[2];
-    int buf_dbflag = 0;
+    MemcpyHandle get_in[4];
+    MemcpyHandle put_out[2];
 
     size_t offset = tile.compute_linear_index();
 
     // Step 4: 加载 weight (只一次)
-    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_handle[0]);
-    memcpy_wait(get_handle[0]);
+    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in[0]);
+    memcpy_wait(get_in[0]);
 
-    // Step 5: 预取第一行
-    memcpy_async(CDBUF(in), input_hbm + offset, row_bytes,
-                 MemcpyGlobalToSpm, get_handle[0]);
-    memcpy_wait(get_handle[0]);
+    // Step 5: 预取前两行 (a pair)
+    if (my_rows > 0) {
+        memcpy_async(inbuf[0], input_hbm + offset, row_bytes,
+                     MemcpyGlobalToSpm, get_in[0]);
+    }
+    if (my_rows > 1) {
+        memcpy_async(inbuf[1], input_hbm + offset + D, row_bytes,
+                     MemcpyGlobalToSpm, get_in[1]);
+    }
 
-    // Step 6: 流水循环: load 下一行 ⇄ 计算当前行
-    for (int r = 0; r < my_rows; ++r) {
-        // 6a. 发起下一行加载到 alternate buffer (与计算重叠)
-        if (r + 1 < my_rows) {
-            memcpy_async(ADBUF(in), input_hbm + offset + (r + 1) * D,
-                         row_bytes, MemcpyGlobalToSpm, get_handle[1 - buf_dbflag]);
+    // Step 6: 两行在飞流水: 每次处理一对行；每行仍有自己的累加器与自己的下标顺序，
+    // 因此每行的浮点求和序列逐字不变 (H2a 的目标是按位等价)。
+    for (int r = 0; r < my_rows; r += 2) {
+        const int p = (r >> 1) & 1;          // pair parity
+        const int a = p << 1;                // current pair buffers: a, a+1
+        const int na = (1 - p) << 1;         // next pair buffers: na, na+1
+        const int r1 = r + 1;
+        const bool has2 = (r1 < my_rows);
+
+        // 6a. 等当前对的输入就绪
+        memcpy_wait(get_in[a]);
+        if (has2) {
+            memcpy_wait(get_in[a + 1]);
         }
 
-        // 6b. 等待当前 load + 上一轮 store
-        memcpy_wait(get_handle[buf_dbflag]);
-        memcpy_wait(put_handle[buf_dbflag]);
-
-        // 6c. RMS Norm 计算
-        float sum_sq = 0.0f;
-        for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(in)[d]);
-            sum_sq += val * val;
+        // 6b. 先发起下一对的预取，让 HBM 传输躲在当前对的 reduce 之下
+        if (r + 2 < my_rows) {
+            memcpy_async(inbuf[na], input_hbm + offset + (r + 2) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na]);
         }
-        float rstd = 1.0f / sqrtf(sum_sq / static_cast<float>(D) + eps);
-        for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(in)[d]) * rstd
-                        * static_cast<float>(weight[d]);
-            CDBUF(out)[d] = static_cast<half>(val);
+        if (r + 3 < my_rows) {
+            memcpy_async(inbuf[na + 1], input_hbm + offset + (r + 3) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na + 1]);
         }
 
-        // 6d. 发起写回 + 等待完成
-        memcpy_async(output_hbm + offset + r * D, CDBUF(out),
-                     row_bytes, MemcpySpmToGlobal, put_handle[buf_dbflag]);
-        memcpy_wait(put_handle[buf_dbflag]);
+        // 6c. 两条独立累加链：每行自身的表达式与下标顺序不变
+        float sum_sq0 = 0.0f;
+        float sum_sq1 = 0.0f;
+        if (has2) {
+            for (int d = 0; d < D; ++d) {
+                float val0 = static_cast<float>(inbuf[a][d]);
+                float val1 = static_cast<float>(inbuf[a + 1][d]);
+                sum_sq0 += val0 * val0;
+                sum_sq1 += val1 * val1;
+            }
+        } else {
+            for (int d = 0; d < D; ++d) {
+                float val0 = static_cast<float>(inbuf[a][d]);
+                sum_sq0 += val0 * val0;
+            }
+        }
 
-        // 6e. 交换 buffer
-        if (r + 1 < my_rows) {
-            EXDBF;
+        // 6d. 逐行 epilogue + 写回；同一输出 buffer 复用前先等上一对的写回完成
+        const float rstd0 = 1.0f / sqrtf(sum_sq0 / static_cast<float>(D) + eps);
+        memcpy_wait(put_out[0]);
+        rms_norm_epilogue(inbuf[a], weight, outbuf[0], rstd0, D);
+        memcpy_async(output_hbm + offset + r * D, outbuf[0], row_bytes,
+                     MemcpySpmToGlobal, put_out[0]);
+
+        if (has2) {
+            const float rstd1 = 1.0f / sqrtf(sum_sq1 / static_cast<float>(D) + eps);
+            memcpy_wait(put_out[1]);
+            rms_norm_epilogue(inbuf[a + 1], weight, outbuf[1], rstd1, D);
+            memcpy_async(output_hbm + offset + r1 * D, outbuf[1], row_bytes,
+                         MemcpySpmToGlobal, put_out[1]);
         }
     }
 
+    // Drain both deferred output stores before freeing their SPM sources.
+    memcpy_wait(put_out[0]);
+    memcpy_wait(put_out[1]);
     rt_spm_free(spm_base);
 }
 
@@ -155,81 +214,127 @@ __global__ void teco_slave_rms_norm_fp16_add(RmsNormArgs args) {
     int my_rows = static_cast<int>(block[0]);
     if (my_rows == 0) return;
 
-    // Step 3: SPM 分配 (in0/in1/res0/res1/out0/out1/weight)
+    // Step 3: SPM 分配 (in[0..3] / res[0..3] / out0 / out1 / weight)
+    // H2a: two rows in flight -> two (input, residual) pairs resident.
     const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
-    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 7));
+    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 11));
     half *in0    = spm_base;
     half *in1    = in0 + D;
-    half *res0   = in1 + D;
+    half *in2    = in1 + D;
+    half *in3    = in2 + D;
+    half *res0   = in3 + D;
     half *res1   = res0 + D;
-    half *out0   = res1 + D;
+    half *res2   = res1 + D;
+    half *res3   = res2 + D;
+    half *out0   = res3 + D;
     half *out1   = out0 + D;
     half *weight = out1 + D;
+    half *inbuf[4]  = {in0, in1, in2, in3};
+    half *resbuf[4] = {res0, res1, res2, res3};
+    half *outbuf[2] = {out0, out1};
 
-    MemcpyHandle get_in_handle[2];
-    MemcpyHandle get_res_handle[2];
-    MemcpyHandle put_out_handle[2];
-    MemcpyHandle put_res_handle[2];
-    int buf_dbflag = 0;
+    MemcpyHandle get_in[4];
+    MemcpyHandle get_res[4];
+    MemcpyHandle put_out[2];
+    MemcpyHandle put_res[4];
 
     size_t offset = tile.compute_linear_index();
 
     // Step 4: 加载 weight (只一次)
-    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in_handle[0]);
-    memcpy_wait(get_in_handle[0]);
+    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in[0]);
+    memcpy_wait(get_in[0]);
 
-    // Step 5: 预取第一行 input + residual
-    memcpy_async(CDBUF(in),  input_hbm + offset,    row_bytes,
-                 MemcpyGlobalToSpm, get_in_handle[0]);
-    memcpy_async(CDBUF(res), residual_hbm + offset, row_bytes,
-                 MemcpyGlobalToSpm, get_res_handle[0]);
-    memcpy_wait(get_in_handle[0]);
-    memcpy_wait(get_res_handle[0]);
+    // Step 5: 预取前两行的 input + residual
+    if (my_rows > 0) {
+        memcpy_async(inbuf[0],  input_hbm + offset,      row_bytes, MemcpyGlobalToSpm, get_in[0]);
+        memcpy_async(resbuf[0], residual_hbm + offset,   row_bytes, MemcpyGlobalToSpm, get_res[0]);
+    }
+    if (my_rows > 1) {
+        memcpy_async(inbuf[1],  input_hbm + offset + D,    row_bytes, MemcpyGlobalToSpm, get_in[1]);
+        memcpy_async(resbuf[1], residual_hbm + offset + D, row_bytes, MemcpyGlobalToSpm, get_res[1]);
+    }
 
-    // Step 6: 流水循环: load 下一行 ⇄ 计算当前行
-    for (int r = 0; r < my_rows; ++r) {
-        // 6a. 发起下一行加载到 alternate buffer (与计算重叠)
-        if (r + 1 < my_rows) {
-            memcpy_async(ADBUF(in), input_hbm + offset + (r + 1) * D,
-                         row_bytes, MemcpyGlobalToSpm, get_in_handle[1 - buf_dbflag]);
-            memcpy_async(ADBUF(res), residual_hbm + offset + (r + 1) * D,
-                         row_bytes, MemcpyGlobalToSpm, get_res_handle[1 - buf_dbflag]);
+    // Step 6: 两行在飞流水 (H2a)。每行仍有自己的累加器与自己的下标顺序；residual 相加、
+    // residual_out 舍入与累加表达式逐字不变。
+    for (int r = 0; r < my_rows; r += 2) {
+        const int p = (r >> 1) & 1;
+        const int a = p << 1;
+        const int na = (1 - p) << 1;
+        const int r1 = r + 1;
+        const bool has2 = (r1 < my_rows);
+
+        memcpy_wait(get_in[a]);
+        memcpy_wait(get_res[a]);
+        if (has2) {
+            memcpy_wait(get_in[a + 1]);
+            memcpy_wait(get_res[a + 1]);
         }
 
-        // 6b. 等待当前 load + 上一轮 store
-        memcpy_wait(get_in_handle[buf_dbflag]);
-        memcpy_wait(get_res_handle[buf_dbflag]);
-        memcpy_wait(put_out_handle[buf_dbflag]);
-        memcpy_wait(put_res_handle[buf_dbflag]);
-
-        // 6c. Add residual + RMS Norm
-        float sum_sq = 0.0f;
-        for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(in)[d])
-                        + static_cast<float>(CDBUF(res)[d]);
-            CDBUF(res)[d] = static_cast<half>(val);  // residual_out
-            sum_sq += val * val;
+        // 6a. 下一对预取；resbuf 同时是 residual_out 的写出源，故先等该组的上一轮写回
+        if (r + 2 < my_rows) {
+            memcpy_wait(put_res[na]);
+            memcpy_async(inbuf[na], input_hbm + offset + (r + 2) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na]);
+            memcpy_async(resbuf[na], residual_hbm + offset + (r + 2) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_res[na]);
         }
-        float rstd = 1.0f / sqrtf(sum_sq / static_cast<float>(D) + eps);
-        for (int d = 0; d < D; ++d) {
-            float val = static_cast<float>(CDBUF(res)[d]) * rstd
-                        * static_cast<float>(weight[d]);
-            CDBUF(out)[d] = static_cast<half>(val);
+        if (r + 3 < my_rows) {
+            memcpy_wait(put_res[na + 1]);
+            memcpy_async(inbuf[na + 1], input_hbm + offset + (r + 3) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na + 1]);
+            memcpy_async(resbuf[na + 1], residual_hbm + offset + (r + 3) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_res[na + 1]);
         }
 
-        // 6d. 发起写回 + 等待完成
-        memcpy_async(output_hbm + offset + r * D, CDBUF(out),
-                     row_bytes, MemcpySpmToGlobal, put_out_handle[buf_dbflag]);
-        memcpy_async(res_out_hbm + offset + r * D, CDBUF(res),
-                     row_bytes, MemcpySpmToGlobal, put_res_handle[buf_dbflag]);
-        memcpy_wait(put_out_handle[buf_dbflag]);
-        memcpy_wait(put_res_handle[buf_dbflag]);
+        // 6b. 两条独立累加链：每行的表达式与下标顺序不变
+        float sum_sq0 = 0.0f;
+        float sum_sq1 = 0.0f;
+        if (has2) {
+            for (int d = 0; d < D; ++d) {
+                float val0 = static_cast<float>(inbuf[a][d])
+                             + static_cast<float>(resbuf[a][d]);
+                float val1 = static_cast<float>(inbuf[a + 1][d])
+                             + static_cast<float>(resbuf[a + 1][d]);
+                resbuf[a][d] = static_cast<half>(val0);      // residual_out
+                resbuf[a + 1][d] = static_cast<half>(val1);  // residual_out
+                sum_sq0 += val0 * val0;
+                sum_sq1 += val1 * val1;
+            }
+        } else {
+            for (int d = 0; d < D; ++d) {
+                float val0 = static_cast<float>(inbuf[a][d])
+                             + static_cast<float>(resbuf[a][d]);
+                resbuf[a][d] = static_cast<half>(val0);      // residual_out
+                sum_sq0 += val0 * val0;
+            }
+        }
 
-        // 6e. 交换 buffer
-        if (r + 1 < my_rows) {
-            EXDBF;
+        // 6c. 逐行 epilogue + 写回 (output 与 residual_out)
+        const float rstd0 = 1.0f / sqrtf(sum_sq0 / static_cast<float>(D) + eps);
+        memcpy_wait(put_out[0]);
+        rms_norm_epilogue(resbuf[a], weight, outbuf[0], rstd0, D);
+        memcpy_async(output_hbm + offset + r * D, outbuf[0], row_bytes,
+                     MemcpySpmToGlobal, put_out[0]);
+        memcpy_async(res_out_hbm + offset + r * D, resbuf[a], row_bytes,
+                     MemcpySpmToGlobal, put_res[a]);
+
+        if (has2) {
+            const float rstd1 = 1.0f / sqrtf(sum_sq1 / static_cast<float>(D) + eps);
+            memcpy_wait(put_out[1]);
+            rms_norm_epilogue(resbuf[a + 1], weight, outbuf[1], rstd1, D);
+            memcpy_async(output_hbm + offset + r1 * D, outbuf[1], row_bytes,
+                         MemcpySpmToGlobal, put_out[1]);
+            memcpy_async(res_out_hbm + offset + r1 * D, resbuf[a + 1], row_bytes,
+                         MemcpySpmToGlobal, put_res[a + 1]);
         }
     }
 
+    // Drain all deferred stores before freeing their SPM sources. Unused waits are idle-safe.
+    memcpy_wait(put_out[0]);
+    memcpy_wait(put_out[1]);
+    memcpy_wait(put_res[0]);
+    memcpy_wait(put_res[1]);
+    memcpy_wait(put_res[2]);
+    memcpy_wait(put_res[3]);
     rt_spm_free(spm_base);
 }

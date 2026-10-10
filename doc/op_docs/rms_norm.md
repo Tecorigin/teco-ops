@@ -88,6 +88,13 @@ tecoopsStatus_t tecoopsRmsNorm(
 
 ## 性能优化
 
+### PyTorch 当前流绑定
+
+PyTorch 绑定在每次调用前将 Teco-Ops 句柄绑定到调用方当前的 SDAA stream，
+使 RMSNorm 与同一 stream 上的输入生产和后续消费保持顺序，避免句柄默认流
+引入的隐式串行化或跨流重排。该改动不改变 kernel 数学、输入输出布局或 API
+签名；构建后的 C++/Python 正确性和同口径性能门禁仍需在厂商环境执行。
+
 ### 多核并行划分
 
 使用 Hal Tile `R1C32_CR` 模式进行行并行划分，将 `num_tokens` 行均匀分配到各 SPE 核心。每个核心处理 `my_rows` 行，通过 `tile.compute_linear_index()` 计算 HBM 偏移量。
@@ -195,3 +202,41 @@ residual = torch.randn(64, 4096, dtype=torch.half, device='sdaa')
 res_out = torch.empty(64, 4096, dtype=torch.half, device='sdaa')
 tecoops.rms_norm(x, w, residual, out, res_out, eps=1e-6)
 ```
+
+## FP16 SIMD epilogue 与 plain 输出 DMA
+
+plain/add 的第二遍输出循环使用 `floatv16` 主循环和标量尾循环，保留
+FP32 规约与逐元素数学顺序。PyTorch 入口绑定调用方当前 SDAA stream。
+
+plain 输出 DMA 的 source buffer 持有到原有的同 buffer 复用 wait；
+删除紧接 store 的 wait，在释放 SPM 前 drain 两个输出 handle。输入和
+输出 buffer 独立，空闲 handle 初始化为 reply/counter=0/0。add 路径
+保持原来的 wait，因为 residual prefetch 会复用 store source。
+
+### 各模型独立证据
+
+以下固定 commit 链接保留完整 shape、原始三次计时与 median、正确性、
+源码/DSO 哈希和模型收据；每项只证明对应模型和对应源码。
+
+| 模型 / 机制 | 测试范围与结果 | 独立证明 |
+| --- | --- | --- |
+| InternVL / E29 SIMD | hidden4096 与 Q/K128，原 oracle/stream/tail/输入不变；TP2 text/image greedy32，318.024065s 稳态。旧 Q/K 全局 head 行数属于边界压力测试；实际 TP2 每 rank shape 见下一行 | [E29 proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3b8bf1a28fa38374e027dbe2e785cdebd4e06e1e/model_adaptations/InternVL3_5SCUdoudui/validation/rms_epilogue_simd_20261007.json) |
+| InternVL / plain DMA | 48/48 focused 与 A/B/A-after bitwise 一致；per-rank Q/K 行数28976/7244和69632/17408；TP2 greedy32，317.156770s 稳态。长 hidden 同步调用延迟下降1.70%–1.75%，Q/K下降12.20%–13.19% | [DMA proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3b8bf1a28fa38374e027dbe2e785cdebd4e06e1e/model_adaptations/InternVL3_5SCUdoudui/validation/rms_plain_writeback_20261007.json) |
+| Hy-MT2 / E29 SIMD | 自有 hidden2048/QK128、eps1e-5，36 focused 与原0.002容差；TP1 greedy32和129模块/映射/peak。设备 kernel 延迟下降约32%–65%，host wall计时含噪声/异常值；本模型未验证新的 plain DMA | [Hy proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/2c4378bf0a0f5794b0b3d1fd5a35d2d5e947ce95/model_adaptations/HyMT2SCUdoudui/validation/rms_epilogue_simd_20261007.json) |
+| MiniCPM / E29 SIMD | 自有N1/N7、D1536、eps1e-6，原plain0.005/add和residual0.01；A/B/A-after focused、公开8/8、TP1 greedy32，301.928123s/110稳态请求。同步调用延迟下降24.72%–48.18%；本模型 plain DMA 候选为NO-GO | [Mini proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/0d0c5d4a1ce4361768f8a7e29fa5de0906a918d8/model_adaptations/MiniCPM5SCUdoudui/validation/rms_epilogue_simd_20261008.json) |
+
+E29 是 `e29b53c256f366e6eee538d656bfbb56e867cefc`，kernel SHA256 为
+`41a517c23ae849f0d36cbdb2746ea2b75e21e5f2efe4dbaf44b6ed99a62193be`。
+InternVL plain DMA 的 kernel SHA256 为
+`93e8e80d08d401fffaa3060bf8e6e24bd989ab59fd8cb09c079228710f66d5b7`。
+Hy/Mini 的 E29 模型结果不验证新的 DMA kernel。
+
+三次同步 host operator-call 与 profiler device 时间按各证明的计时范围
+解释，不相互替代。短 shape 的噪声、负向 median、异常值和模型计时漂移
+保留在原证明中；以上各项均不宣称稳定端到端模型加速。
+
+复现脚本、epilogue-only.patch 与 plain-writeback-only.patch 位于上述
+各模型公开目录。[官方定向 CI](https://github.com/Tecorigin/teco-ops/pull/37#issuecomment-6041962254)
+通过的 head 是 `2949f7061a05af0f4cb2b88fb3344380e3dfc4e0`，早于 plain
+DMA 提交；当前 DMA head 的官方 CI/完整 wheel、官方模型环境和组委会
+完整精度尚未验证。原始收据中的限制仍按其实际源码与构建范围保留。
