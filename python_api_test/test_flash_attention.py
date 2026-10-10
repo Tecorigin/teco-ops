@@ -199,7 +199,8 @@ def _run_one_fa_test(
     cu_seqlens_q = cu_seqlens_q.to("sdaa")
     seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
     bt_dev = block_table.to("sdaa")
-    out_dev = torch.empty_like(q_dev)
+    # Seed the output so a missing write cannot be hidden by an empty tensor.
+    out_dev = torch.full_like(q_dev, 7.0)
 
     tecoops.flash_attn_varlen_func(
         q_dev, k_dev, v_dev,
@@ -418,6 +419,43 @@ def test_d512():
         ok, _ = _run_one_fa_test(q, kc, vc, q_lens, kv_lens, bt, label=name)
         all_ok = all_ok and ok
     return all_ok
+def test_explicit_scale():
+    """The ABI must honor scale, including zero and negative finite values."""
+    all_ok = True
+    for label, q_lens, kv_lens, d in [
+        ("prefill", [33], [33], 64),
+        ("decode", [1], [65], 128),
+        ("chunked", [17], [65], 64),
+        ("mixed", [1, 17], [65, 33], 128),
+    ]:
+        q, kc, vc, bt = _make_random_fa_inputs(
+            q_lens, kv_lens, num_heads=8, num_kv_heads=2, head_size=d)
+        for scale in (1.0, 0.0, -0.125):
+            ok, _ = _run_one_fa_test(
+                q, kc, vc, q_lens, kv_lens, bt, softmax_scale=scale,
+                label=f"scale_{scale}_{label}")
+            all_ok = all_ok and ok
+    return all_ok
+
+
+def test_invalid_scale():
+    q, kc, vc, bt = _make_random_fa_inputs([1], [33], head_size=64)
+    q, kc, vc, bt = [x.contiguous().to("sdaa") for x in (q, kc, vc, bt)]
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="sdaa")
+    used = torch.tensor([33], dtype=torch.int32, device="sdaa")
+    out = torch.empty_like(q)
+    for scale in (float("nan"), float("inf"), -float("inf"), 1e300):
+        try:
+            tecoops.flash_attn_varlen_func(
+                q, kc, vc, 1, cu, 33, torch.Tensor(), used, scale,
+                True, torch.Tensor(), bt, False, out)
+        except RuntimeError as error:
+            if "softmax_scale must be finite" not in str(error):
+                raise
+        else:
+            raise AssertionError(f"invalid scale accepted: {scale}")
+    print("invalid scales rejected: 4/4 PASSED")
+    return True
 
 
 # ========================================================================
@@ -439,6 +477,8 @@ if __name__ == "__main__":
     tests = [
         ("test_d256", test_d256),
         ("test_d512", test_d512),
+        ("test_invalid_scale", test_invalid_scale),
+        ("test_explicit_scale", test_explicit_scale),
         ("test_prefill",  test_prefill),
         ("test_decode",  test_decode),
         ("test_chunked_prefill",  test_chunked_prefill),
@@ -458,3 +498,5 @@ if __name__ == "__main__":
     else:
         print("SOME TESTS FAILED")
     print("=" * 60)
+
+    raise SystemExit(0 if all_passed else 1)

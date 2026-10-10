@@ -85,6 +85,16 @@ tecoops.flash_attn_varlen_func(
 )
 ```
 
+### 显式 scale 与兼容性
+
+`tecoopsFlashAttentionWithScale` 在原 C 接口 `max_block_num` 后新增 `float softmax_scale`，其余参数和布局一致。
+原 `tecoopsFlashAttention` 符号及默认 `1/sqrt(head_size)` 语义保持不变。
+Python `flash_attn_varlen_func` 的已有 `softmax_scale` 参数现在传到 kernel，有限零值和负值也按公式计算；非有限值拒绝执行。
+`softmax_scale=0` 会使所有有效 QK 分数变为 0，因此 softmax 在当前 query 可见的 KV 项上得到均匀 attention 权重；
+`softmax_scale=1` 则使用未缩放的 QK 内积作为分数。
+Python pybind 的完整位置参数 ABI 不变，调用方仍应显式提供 scale。
+该修复不改变 causal/window 支持或 kernel 数学实现。Gemma 的 scale=1 需要这项修复；D512 容量支持另见 PR41，本 PR 未做模型接入或性能声明。
+
 ### 参数信息
 
 tecoopsFlashAttention参数信息
@@ -95,8 +105,8 @@ tecoopsFlashAttention参数信息
 | max_seqlen_q   | 输入      | 主机端        | 最大 query 序列长度                                                |
 | max_seqlen_k   | 输入      | 主机端        | 最大 KV 序列长度                                                   |
 | max_block_num  | 输入      | 主机端        | KV cache 中最大 block 数量                                         |
-| q_seq_lens     | 输入      | 主机端        | 每 batch 的 query 长度，`[batch_size]`                           |
-| kv_seq_lens    | 输入      | 主机端        | 每 batch 的 KV 长度，`[batch_size]`                              |
+| q_seq_lens     | 输入      | 设备端        | 每 batch 的 query 长度，`[batch_size]`                           |
+| kv_seq_lens    | 输入      | 设备端        | 每 batch 的 KV 长度，`[batch_size]`                              |
 | blockTableDesc | 输入      | 主机端        | block table 描述符                                                 |
 | blockTable     | 输入      | 设备端        | block id 映射表，`[batch_size, block_table_dim]` int32           |
 | qDataDesc      | 输入      | 主机端        | Q 数据描述符                                                       |
@@ -108,6 +118,13 @@ tecoopsFlashAttention参数信息
 | oDataDesc      | 输入      | 主机端        | 输出描述符                                                         |
 | oData          | 输出      | 设备端        | 输出矩阵，`[total_q, num_heads, head_size]` half                 |
 | workspace      | 输入      | 设备端        | 工作空间（当前未使用）                                             |
+
+### 输出初始化契约
+
+`tecoopsFlashAttention` 会覆盖全部 `[total_q, num_heads, head_size]` 输出元素。PyTorch
+绑定在 `out` 未提供时使用 `empty_like`，在 `out` 已提供时直接写入，不再为每次调用执行整块
+设备清零。调用方必须传入与 `q` 同形状、可写的输出张量；API focused test 用 `7.0` 哨兵预填
+输出并与参考结果逐元素比较，以便暴露任何未写入区域。
 
 ### 类型限制
 
@@ -125,6 +142,15 @@ tecoopsFlashAttention参数信息
 | kv_seq_lens   | int32    | `[batch_size]`                                     | Array    |
 | oData         | float16  | `[total_q, num_heads, head_size]`                  | Array    |
 | workspace     | void*    | 标量                                                 | -        |
+
+### PyTorch 绑定的变长元数据
+
+SDAA kernel 直接读取设备端的 `q_seq_lens` 与 `kv_seq_lens` 指针。PyTorch
+绑定从设备端 `cu_seqlens_q` 的相邻元素差分生成连续的 `q_seq_lens`，不把
+累积长度拷回 CPU，也不再把派生数组复制回设备；`seqused_k` 直接作为
+`kv_seq_lens` 使用。绑定在派发前把句柄绑定到调用方当前 SDAA stream，保证
+元数据差分与 attention kernel 的顺序。这样保持 C API 的 `[batch_size]` ABI
+不变，同时避免每次变长调用的主机同步。
 
 ## 性能优化
 
@@ -163,9 +189,14 @@ tecoopsFlashAttention参数信息
 
 ### 性能数据
 
-| 测试环境    | 测例                 | 硬件时间 (us) |
-| ----------- | -------------------- | ------------- |
-| CI 测试环境 | test_case_0.prototxt | 待补充        |
+| 测试环境 | 测例 | 配置与 Shape | 状态 |
+| --- | --- | --- | --- |
+| 太初 SDAA 3.2.0 | 0.prototxt | Q: [256, 32, 128], KV_cache: [8, 8, 32, 128] | OK |
+| 太初 SDAA 3.2.0 | 1.prototxt | Q: [256, 32, 128], KV_cache: [8, 8, 32, 128] | OK |
+| 太初 SDAA 3.2.0 | 2.prototxt | Q: [256, 32, 128], KV_cache: [8, 8, 32, 128] | OK |
+| 太初 SDAA 3.2.0 | 3.prototxt | Q: [256, 32, 128], KV_cache: [8, 8, 32, 128] | OK |
+| 太初 SDAA 3.2.0 | 4.prototxt | Q: [256, 32, 128], KV_cache: [8, 8, 32, 128] | OK |
+| 太初 SDAA 3.2.0 | 5.prototxt | Q: [256, 32, 128], KV_cache: [8, 8, 32, 128] | OK |
 
 ## 分支派发
 

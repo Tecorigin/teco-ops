@@ -88,6 +88,13 @@ tecoopsStatus_t tecoopsRmsNorm(
 
 ## 性能优化
 
+### PyTorch 当前流绑定
+
+PyTorch 绑定在每次调用前将 Teco-Ops 句柄绑定到调用方当前的 SDAA stream，
+使 RMSNorm 与同一 stream 上的输入生产和后续消费保持顺序，避免句柄默认流
+引入的隐式串行化或跨流重排。该改动不改变 kernel 数学、输入输出布局或 API
+签名；构建后的 C++/Python 正确性和同口径性能门禁仍需在厂商环境执行。
+
 ### 多核并行划分
 
 使用 Hal Tile `R1C32_CR` 模式进行行并行划分，将 `num_tokens` 行均匀分配到各 SPE 核心。每个核心处理 `my_rows` 行，通过 `tile.compute_linear_index()` 计算 HBM 偏移量。
