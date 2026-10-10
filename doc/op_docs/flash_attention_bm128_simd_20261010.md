@@ -72,8 +72,23 @@ with `--perf_repeat=1` inside one clean window and constitute no timing evidence
 * **Operator-level only.** `tecoops.flash_attn_varlen_func` has 0 calls in the real
   forward of both models (the delivered path uses SDPA), so **no end-to-end or
   model-level gain is claimed**.
-* The widen adds an implicit `BK % 16 == 0` precondition to the `BM == 128` path.
+* The widen adds an implicit `BK % 16 == 0` precondition to the `BM == 128` path
+  (both former scalar loops now step `o_accum` in 16-float `floatv16` strides).
   It is implied today by the baseline's own `for (hb = 0; hb < BK / gemm_bn; hb++)`
   (`:348`), which already requires `BK % 32 == 0` for every head dim to be accumulated
-  at all — so no shape on which the baseline is correct can overrun. A defensive
-  `static_assert` (or a Step-C-style tail loop) is queued as its **own** atomic commit.
+  at all — so no shape on which the baseline is correct can overrun.
+
+## Dispatch precondition, enforced fail-closed (`find_flash_attention.cpp`)
+
+`BK` is **not** a compile-time value (`int BK = args.size_per_head;` in the kernel), so
+the precondition above cannot be written as a `static_assert`; it is bound instead in the
+existing outer dispatch `findFlashAttentionBranch()` (one `head_dim % 16 != 0` check, once
+per operator dispatch — no kernel hot-path branch, no `getenv`). Returning `-1` reuses the
+file's existing convention: `FlashAttentionOp::findImpl()` maps it to
+`Status::NOT_IMPLEMENTED`, so such a shape now fails closed instead of silently dropping
+`head_dim` tail columns. Head dims 64 / 128 / 256 / 512 — every shape under test — bypass
+the guard unchanged.
+
+* **Out of scope here (separate follow-up):** the baseline's `BK / gemm_bn` integer
+  truncation (`:348`) also silently drops `head_dim % 32` tail columns on *every* branch.
+  That defect predates this change and is deliberately **not** folded into this commit.
