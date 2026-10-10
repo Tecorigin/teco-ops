@@ -2,6 +2,42 @@
 
 Teco-Ops 算子开发项目，提供基于 SDAA C 编程模型的高性能算子实现、C++ 接口封装、Python API 绑定（PyTorch 扩展）、Plugin 自定义算子接口（Teco-Inference 推理框架）及完整的测试框架。通过本项目，您可以高效地开发和优化自定义算子，将其封装为 C++/Python 接口并无缝集成到 PyTorch 或Teco-Inference中，同时利用内置测试框架全面验证算子的正确性与性能。
 
+## SCU都队（四川大学）：MiniCPM5-1B 重点算子接入与 CI 测试说明
+
+依据 2026 年“AI+教育”创新应用技能大赛《AI+加速卡模型适配赛道参赛指南》与太初官方规范，四川大学参赛队伍 **SCU都队**（模型：`OpenBMB/MiniCPM5-1B`，赛题 4）针对大语言模型推理主线，在本项目中完成并接入三个官方指定重点算子：
+
+### 1. 三个指定重点算子与模型集成关系
+
+| 算子名称 | 算法/硬件实现特性 | 模型接入点与作用 | 对应接口与文档 |
+| --- | --- | --- | --- |
+| **`flash_attn_varlen_func`** | Online Softmax 分块累加、SPE 向量化、GQA 映射 | `MiniCPM5-1B` Prefill 阶段变长注意力计算，加速 Prompt 处理 | `tecoops.flash_attn_varlen_func`<br>[设计文档](doc/op_docs/flash_attention.md) |
+| **`reshape_and_cache`** | 32 SPE 跨步并行搬运、PagedAttention 分页 Cache 组装 | `MiniCPM5-1B` Decode 阶段 KV Cache 动态写入，支持高并发长上下文 | `tecoops.reshape_and_cache`<br>[设计文档](doc/op_docs/reshape_and_cache.md) |
+| **`rms_norm`** | Hal Tile 行并行划分、双缓冲异步 DMA 流水、Fused Residual Add | `MiniCPM5-1B` 每一 Transformer 层的输入与输出归一化（1536 维） | `tecoops.rms_norm`<br>[设计文档](doc/op_docs/rms_norm.md) |
+
+### 2. CI 测试环境与执行规范
+
+- **硬件环境**：太初（Tecorigin）AI 加速卡（单卡 4 个 SDAA 逻辑设备，每设备约 15 GiB 显存）。
+- **基础软件栈**：
+  - SDAA 驱动：`3.2.0`
+  - SDAA 运行时：`3.2.0` (`/opt/tecoai/lib64/libsdaart.so`)
+  - PyTorch：`2.12.0a0+git0d62256`
+  - Torch-SDAA：`20260623.8.51.dev0+gitd942f23`
+  - Python：`/home/py312/bin/python`（锁定 `/usr/local/python/bin/python3.12`）
+- **C++ 算子回归与测试入口**：
+  ```bash
+  cd test && source env.sh && sh build.sh --arch teco
+  ./build/demo --gid=0 --perf_repeat=50 --warm_repeat=3 --gtest_repeat=1 --case_path=zoo/teco/flash_attention/test_case/0.prototxt
+  ./build/demo --gid=0 --perf_repeat=50 --warm_repeat=3 --gtest_repeat=1 --case_path=zoo/teco/reshape_and_cache/test_case/case_0.prototxt
+  ./build/demo --gid=0 --perf_repeat=50 --warm_repeat=3 --gtest_repeat=1 --case_path=zoo/teco/rms_norm/test_case/case_0.prototxt
+  ```
+- **Python API 测试入口**：
+  ```bash
+  python python_api_test/test_flash_attention.py
+  python python_api_test/test_reshape_and_cache.py
+  python python_api_test/test_rms_norm.py
+  ```
+
+
 ## 代码架构
 
 本项目分为算子代码（采用 interface + ual 分层架构设计）和 Python API 接口两部分：

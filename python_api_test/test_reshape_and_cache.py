@@ -119,8 +119,12 @@ def check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim):
     num_blocks = 64  # ceil(512/16) * 1.5
 
     # 同一组输入 (fp16)
-    key = torch.randn(num_tokens, kv_heads, head_dim, dtype=torch.float16)
-    value = torch.randn(num_tokens, kv_heads, head_dim, dtype=torch.float16)
+    # Exercise the ABI boundary with the non-contiguous fused-QKV view shape
+    # produced by model code; the binding must materialize read-only inputs.
+    key = torch.randn(num_tokens, head_dim, kv_heads, dtype=torch.float16).transpose(1, 2)
+    value = torch.randn(num_tokens, head_dim, kv_heads, dtype=torch.float16).transpose(1, 2)
+    assert not key.is_contiguous()
+    assert not value.is_contiguous()
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64)
     assert slot_mapping.max() < num_blocks * block_size
 

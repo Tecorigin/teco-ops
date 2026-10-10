@@ -199,7 +199,8 @@ def _run_one_fa_test(
     cu_seqlens_q = cu_seqlens_q.to("sdaa")
     seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
     bt_dev = block_table.to("sdaa")
-    out_dev = torch.empty_like(q_dev)
+    # Seed the output so a missing write cannot be hidden by an empty tensor.
+    out_dev = torch.full_like(q_dev, 7.0)
 
     tecoops.flash_attn_varlen_func(
         q_dev, k_dev, v_dev,
@@ -366,6 +367,97 @@ def test_multi_batch():
 
     return all_ok
 
+def test_d256():
+    """D256 BM64 capacity, query tile tails and paged causal reference."""
+    print("-" * 60)
+    print("D256 测试 (BM=64, H=16)")
+    all_ok = True
+    # Target first; remaining cases cover tile/block tails and right alignment.
+    cases = [
+        ("d256_gqa_32", 8, [32], [32]),
+        ("d256_gqa_64", 8, [64], [64]),
+        ("d256_gqa_65", 8, [65], [65]),
+        ("d256_gqa_128", 8, [128], [128]),
+        ("d256_gqa_129", 8, [129], [129]),
+        ("d256_gqa_256", 8, [256], [256]),
+        ("d256_non_gqa_65", 16, [65], [65]),
+        ("d256_decode_tail", 8, [1], [129]),
+        ("d256_chunked_tail", 8, [65], [129]),
+        ("d256_mixed", 8, [1, 65], [129, 65]),
+    ]
+    for name, kv_heads, q_lens, kv_lens in cases:
+        q, kc, vc, bt = _make_random_fa_inputs(
+            q_lens, kv_lens, num_heads=16, num_kv_heads=kv_heads,
+            head_size=256,
+        )
+        ok, _ = _run_one_fa_test(q, kc, vc, q_lens, kv_lens, bt, label=name)
+        all_ok = all_ok and ok
+    return all_ok
+
+
+def test_d512():
+    """D512 BM32 capacity, tile tails and paged causal reference."""
+    print("-" * 60)
+    print("D512 测试 (BM=32, H=16)")
+    all_ok = True
+    cases = [
+        ("d512_gqa_32", 1, [32], [32]),
+        ("d512_gqa_1", 1, [1], [1]),
+        ("d512_gqa_31", 1, [31], [31]),
+        ("d512_gqa_33", 1, [33], [33]),
+        ("d512_gqa_65", 1, [65], [65]),
+        ("d512_decode_tail", 1, [1], [65]),
+        ("d512_chunked_tail", 1, [33], [65]),
+        ("d512_mixed", 1, [1, 33], [65, 65]),
+        ("d512_non_gqa_33", 16, [33], [33]),
+    ]
+    for name, kv_heads, q_lens, kv_lens in cases:
+        q, kc, vc, bt = _make_random_fa_inputs(
+            q_lens, kv_lens, num_heads=16, num_kv_heads=kv_heads,
+            head_size=512,
+        )
+        ok, _ = _run_one_fa_test(q, kc, vc, q_lens, kv_lens, bt, label=name)
+        all_ok = all_ok and ok
+    return all_ok
+def test_explicit_scale():
+    """The ABI must honor scale, including zero and negative finite values."""
+    all_ok = True
+    for label, q_lens, kv_lens, d in [
+        ("prefill", [33], [33], 64),
+        ("decode", [1], [65], 128),
+        ("chunked", [17], [65], 64),
+        ("mixed", [1, 17], [65, 33], 128),
+    ]:
+        q, kc, vc, bt = _make_random_fa_inputs(
+            q_lens, kv_lens, num_heads=8, num_kv_heads=2, head_size=d)
+        for scale in (1.0, 0.0, -0.125):
+            ok, _ = _run_one_fa_test(
+                q, kc, vc, q_lens, kv_lens, bt, softmax_scale=scale,
+                label=f"scale_{scale}_{label}")
+            all_ok = all_ok and ok
+    return all_ok
+
+
+def test_invalid_scale():
+    q, kc, vc, bt = _make_random_fa_inputs([1], [33], head_size=64)
+    q, kc, vc, bt = [x.contiguous().to("sdaa") for x in (q, kc, vc, bt)]
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="sdaa")
+    used = torch.tensor([33], dtype=torch.int32, device="sdaa")
+    out = torch.empty_like(q)
+    for scale in (float("nan"), float("inf"), -float("inf"), 1e300):
+        try:
+            tecoops.flash_attn_varlen_func(
+                q, kc, vc, 1, cu, 33, torch.Tensor(), used, scale,
+                True, torch.Tensor(), bt, False, out)
+        except RuntimeError as error:
+            if "softmax_scale must be finite" not in str(error):
+                raise
+        else:
+            raise AssertionError(f"invalid scale accepted: {scale}")
+    print("invalid scales rejected: 4/4 PASSED")
+    return True
+
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -383,6 +475,10 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     tests = [
+        ("test_d256", test_d256),
+        ("test_d512", test_d512),
+        ("test_invalid_scale", test_invalid_scale),
+        ("test_explicit_scale", test_explicit_scale),
         ("test_prefill",  test_prefill),
         ("test_decode",  test_decode),
         ("test_chunked_prefill",  test_chunked_prefill),
@@ -402,3 +498,5 @@ if __name__ == "__main__":
     else:
         print("SOME TESTS FAILED")
     print("=" * 60)
+
+    raise SystemExit(0 if all_passed else 1)

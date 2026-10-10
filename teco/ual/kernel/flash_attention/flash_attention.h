@@ -32,5 +32,7 @@
 using tecoops::ual::args::FlashAttentionArgs;
 
 __global__ void teco_slave_flash_attention_half(FlashAttentionArgs arg);
+__global__ void teco_slave_flash_attention_half_d256(FlashAttentionArgs arg);
+__global__ void teco_slave_flash_attention_half_d512(FlashAttentionArgs arg);
 
 #endif  // TECOOPS_UAL_KERNEL_FLASH_ATTENTION_FLASH_ATTENTION_H_

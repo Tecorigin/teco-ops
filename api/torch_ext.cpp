@@ -27,6 +27,8 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <cmath>
+#include <limits>
 #include <torch/extension.h>
 #include <torch_sdaa/sdaa_extension.h>
 
@@ -63,15 +65,21 @@ void reshape_and_cache_torch(
     torch::Tensor slot_mapping,
     torch::Tensor key_cache, torch::Tensor value_cache) {
     tecoopsHandle_t handle = getGlobalHandle();
-    int num_tokens = key.size(0);
-    int num_kv_heads = key.size(1);
-    int head_size = key.size(2);
+    // The device ABI derives byte offsets from the logical shape and does not
+    // receive PyTorch stride metadata.  vLLM can pass a non-contiguous fused
+    // QKV view here, so materialize only the two read-only inputs at the ABI
+    // boundary.  Cache tensors remain in-place outputs and are not copied.
+    auto key_dense = key.contiguous();
+    auto value_dense = value.contiguous();
+    int num_tokens = key_dense.size(0);
+    int num_kv_heads = key_dense.size(1);
+    int head_size = key_dense.size(2);
     int num_blocks = key_cache.size(0);
     int block_size = key_cache.size(2);
 
     tecoopsReshapeAndCache(
         handle,
-        key.data_ptr(), value.data_ptr(),
+        key_dense.data_ptr(), value_dense.data_ptr(),
         slot_mapping.data_ptr<int64_t>(),
         key_cache.data_ptr(), value_cache.data_ptr(),
         num_tokens, num_kv_heads, head_size,
@@ -84,6 +92,9 @@ void rms_norm_torch(
     torch::Tensor output, c10::optional<torch::Tensor> residual_out,
     double eps) {
     tecoopsHandle_t handle = getGlobalHandle();
+    // Bind the handle to the caller's current SDAA stream so the fused
+    // normalization stays ordered with surrounding PyTorch work.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     int num_tokens = input.size(0);
     int hidden_size = input.size(1);
 
@@ -112,26 +123,36 @@ void flash_attn_varlen_func_torch(
     bool return_softmax_lse,
     torch::Tensor out) {
 
+    const double max_scale = std::numeric_limits<float>::max();
+    TORCH_CHECK(std::isfinite(softmax_scale) &&
+                softmax_scale >= -max_scale && softmax_scale <= max_scale,
+                "softmax_scale must be finite and representable as float32");
+    const float scale = static_cast<float>(softmax_scale);
+
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
-    // parse q_seq_lens
-    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
-    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
-    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
-    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
-    for (int b = 0; b < batch_size; b++) {
-        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
-    }
-    auto q_lens = q_lens_cpu.to("sdaa");
-
-    if (!out.defined()) {
-        out = torch::zeros_like(q);
-    } else {
-        out.zero_();
-    }
+    // The kernel consumes q_seq_lens on device. Derive it from the device-side
+    // cumulative lengths without a D2H sync followed by an H2D copy. The
+    // subtraction produces a contiguous [batch_size] tensor for the ABI.
+    auto q_lens = (
+        cu_seqlens_q.narrow(0, 1, batch_size) -
+        cu_seqlens_q.narrow(0, 0, batch_size)).contiguous();
 
     tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the Teco-Ops launch ordered with the device-side metadata
+    // subtraction and the caller's other PyTorch work.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+
+    // The kernel writes every [total_q, num_heads, head_size] output element.
+    // Allocate without a device-wide clear so each call does not pay for a
+    // redundant full-output memset. The focused API test seeds a caller-
+    // provided output tensor with a sentinel and compares the complete result,
+    // so an incomplete kernel write remains observable.
+    if (!out.defined()) {
+        out = torch::empty_like(q);
+    }
+
     tecoopsTensorDescriptor_t blockTableDesc, qDataDesc, kCacheDesc, vCacheDesc, oDataDesc;
     auto make_desc = [&](tecoopsTensorDescriptor_t &desc, tecoopsDataType_t dtype,
                          torch::Tensor &t) {
@@ -147,8 +168,8 @@ void flash_attn_varlen_func_torch(
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
 
-    tecoopsFlashAttention(handle,
-                          max_seqlen_q, max_seqlen_k, max_block_num,
+    tecoopsFlashAttentionWithScale(handle,
+                          max_seqlen_q, max_seqlen_k, max_block_num, scale,
                           (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
                           blockTableDesc, block_table.data_ptr(),
                           qDataDesc, q.data_ptr(),
