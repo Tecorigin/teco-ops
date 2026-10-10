@@ -32,6 +32,7 @@ using tecoops::ual::args::MsDeformAttnBackwardArgs;
 __global__ void teco_slave_ms_deform_attn_backward_zero_fp32(MsDeformAttnBackwardArgs args);
 __global__ void teco_slave_ms_deform_attn_backward_fp32(MsDeformAttnBackwardArgs args);
 __global__ void teco_slave_ms_deform_attn_backward_fp16(MsDeformAttnBackwardArgs args);
+__global__ void teco_slave_ms_deform_attn_backward_fp32_grain(MsDeformAttnBackwardArgs args);
 __global__ void teco_slave_ms_deform_attn_backward_cast_fp16(MsDeformAttnBackwardArgs args);
 __global__ void teco_slave_ms_deform_attn_backward_list_init(MsDeformAttnBackwardArgs args);
 __global__ void teco_slave_ms_deform_attn_backward_list_producer_fp32(MsDeformAttnBackwardArgs args);

@@ -36,6 +36,15 @@ namespace ops {
 int findMsDeformAttnBackwardBranch(
     const args::MsDeformAttnBackwardPatchArgs *arg) {
     if (arg->data_type == common::UALDataType::UAL_DTYPE_FLOAT) {
+        // Shape-adaptive grain for the legacy atomic path: when the owner grain
+        // would leave SPEs idle (owners < spe_num) the (owner, level, point)
+        // grain spreads the grad_value atomics over far more SPEs.  Bound once
+        // per call, outside the kernel (AGENTS.md rule 6).
+        const int64_t owners = static_cast<int64_t>(arg->atargs->batch) *
+                               arg->atargs->num_queries * arg->atargs->num_heads;
+        if (owners < arg->atargs->spe_num) {
+            return 2;
+        }
         return 0;
     }
     if (arg->data_type == common::UALDataType::UAL_DTYPE_HALF) {

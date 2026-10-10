@@ -51,11 +51,13 @@ struct MsDeformAttnBackwardType {
 static MsDeformAttnBackwardType::PImplType MsDeformAttnBackwardAlgos[] = {
     teco_slave_ms_deform_attn_backward_fp32,
     teco_slave_ms_deform_attn_backward_fp16,
+    teco_slave_ms_deform_attn_backward_fp32_grain,
 };
 
 static const char *MsDeformAttnBackwardDescriptions[] = {
     "teco_slave_ms_deform_attn_backward_fp32",
     "teco_slave_ms_deform_attn_backward_fp16",
+    "teco_slave_ms_deform_attn_backward_fp32_grain",
 };
 
 struct MsDeformAttnBackwardOp
