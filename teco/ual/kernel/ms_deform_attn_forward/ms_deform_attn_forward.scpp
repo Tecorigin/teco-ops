@@ -1,0 +1,156 @@
+// BSD 3-Clause License
+//
+// Copyright (c) 2024, Tecorigin Co., Ltd.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice, this
+//    list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from
+//    this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+#include "ual/kernel/ms_deform_attn_forward/ms_deform_attn_forward.h"
+
+#include <cmath>
+#include <cstdint>
+#include <sdaa_memcpy.h>
+
+#include "teco_kernel_context.h"
+
+namespace {
+
+__device__ inline float read_as_float(const float *data, size_t index) {
+    return data[index];
+}
+
+// Native half conversion flushes subnormals on SDAA. Preserve their bits before
+// coordinate scaling, which can amplify a tiny input error by the image width.
+__device__ inline float read_as_float(const half *data, size_t index) {
+    const std::uint16_t bits =
+        reinterpret_cast<const std::uint16_t *>(data)[index];
+    if ((bits & 0x7c00u) == 0) {
+        const float magnitude = static_cast<float>(bits & 0x03ffu) * 0x1p-24f;
+        return (bits & 0x8000u) ? -magnitude : magnitude;
+    }
+    return static_cast<float>(data[index]);
+}
+
+template <typename T>
+__device__ void ms_deform_attn_forward_kernel(MsDeformAttnForwardArgs args) {
+    const int n = args.batch;
+    const int s = args.value_len;
+    const int m = args.num_heads;
+    const int d = args.head_dim;
+    const int lq = args.num_queries;
+    const int levels = args.num_levels;
+    const int points = args.num_points;
+    const int64_t *shapes = args.spatial_shapes;
+    const T *value = static_cast<const T *>(args.value);
+    const T *locations = static_cast<const T *>(args.sampling_locations);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    T *output = static_cast<T *>(args.output);
+
+    // One work item owns one (batch, query, head) vector.  Sampling
+    // coordinates and weights are shared by all D lanes; keeping the
+    // accumulation vector in SPM/registers avoids recomputing the 16-point
+    // geometry once per channel.
+    const size_t total = static_cast<size_t>(n) * lq * m;
+    const size_t per_spe = (total + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * per_spe;
+    const size_t end = (begin + per_spe < total) ? begin + per_spe : total;
+
+    // One blocking value record per SPE; consumed before its next overwrite.
+    T value_record[128] __attribute__((aligned(64)));
+    for (size_t flat = begin; flat < end; ++flat) {
+        size_t t = flat;
+        const int head = static_cast<int>(t % m);
+        t /= m;
+        const int query = static_cast<int>(t % lq);
+        const int batch = static_cast<int>(t / lq);
+        float acc[128];
+        for (int dim = 0; dim < d; ++dim) acc[dim] = 0.0f;
+
+        int level_start = 0;
+        for (int level = 0; level < levels; ++level) {
+            const int h = shapes[level * 2];
+            const int w = shapes[level * 2 + 1];
+            const size_t loc_base =
+                (((((static_cast<size_t>(batch) * lq + query) * m + head) * levels + level)
+                    * points) * 2);
+            const size_t weight_base =
+                ((((static_cast<size_t>(batch) * lq + query) * m + head) * levels + level)
+                    * points);
+
+            for (int point = 0; point < points; ++point) {
+                const float sx = read_as_float(locations, loc_base + point * 2);
+                const float sy = read_as_float(locations, loc_base + point * 2 + 1);
+                const float x = sx * static_cast<float>(w) - 0.5f;
+                const float y = sy * static_cast<float>(h) - 0.5f;
+                const float x0f = floorf(x);
+                const float y0f = floorf(y);
+                const int x0 = static_cast<int>(x0f);
+                const int y0 = static_cast<int>(y0f);
+                const int x1 = x0 + 1;
+                const int y1 = y0 + 1;
+                const float wx1 = x - x0f;
+                const float wy1 = y - y0f;
+                const float wx0 = 1.0f - wx1;
+                const float wy0 = 1.0f - wy1;
+                const float aw = read_as_float(weights, weight_base + point);
+
+                const size_t value_base =
+                    (static_cast<size_t>(batch) * s + level_start) * m * d;
+                const int xs[2] = {x0, x1};
+                const int ys[2] = {y0, y1};
+                const float wx[2] = {wx0, wx1};
+                const float wy[2] = {wy0, wy1};
+                for (int iy = 0; iy < 2; ++iy) {
+                    for (int ix = 0; ix < 2; ++ix) {
+                        if (xs[ix] >= 0 && xs[ix] < w && ys[iy] >= 0 && ys[iy] < h) {
+                            const size_t pixel = static_cast<size_t>(ys[iy]) * w + xs[ix];
+                            const size_t value_index = value_base + (pixel * m + head) * d;
+                            ::memcpy(value_record, value + value_index, d * sizeof(T));
+                            const float factor = wx[ix] * wy[iy] * aw;
+                            for (int dim = 0; dim < d; ++dim) {
+                                acc[dim] += read_as_float(value_record, dim) * factor;
+                            }
+                        }
+                    }
+                }
+            }
+            level_start += h * w;
+        }
+        const size_t output_base = flat * d;
+        for (int dim = 0; dim < d; ++dim) {
+            output[output_base + dim] = static_cast<T>(acc[dim]);
+        }
+    }
+}
+
+}  // namespace
+
+__global__ void teco_slave_ms_deform_attn_forward_fp32(MsDeformAttnForwardArgs args) {
+    ms_deform_attn_forward_kernel<float>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_forward_fp16(MsDeformAttnForwardArgs args) {
+    ms_deform_attn_forward_kernel<half>(args);
+}

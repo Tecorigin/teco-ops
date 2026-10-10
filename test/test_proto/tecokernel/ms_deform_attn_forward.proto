@@ -1,0 +1,6 @@
+syntax = "proto2";
+package testpt;
+
+// MSDeformAttn forward has no host-side tuning parameters.  Keep an explicit
+// message so the operator has the same test-proto contract as other kernels.
+message MsDeformAttnForwardParam {}

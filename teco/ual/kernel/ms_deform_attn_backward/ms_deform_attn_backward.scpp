@@ -1,0 +1,445 @@
+// BSD 3-Clause License
+//
+// Copyright (c) 2024, Tecorigin Co., Ltd.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holder nor the names of its contributors
+//    may be used to endorse or promote products derived from this software
+//    without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+
+#include "ual/kernel/ms_deform_attn_backward/ms_deform_attn_backward.h"
+#include <cmath>
+#include <cstdint>
+#include "sdaa_atomic.h"
+#include <sdaa_memcpy.h>
+#include "teco_kernel_context.h"
+
+namespace {
+
+__device__ inline float load_scalar(const float *ptr, size_t index) {
+    return ptr[index];
+}
+
+__device__ inline float load_scalar(const half *ptr, size_t index) {
+    const std::uint16_t bits = reinterpret_cast<const std::uint16_t *>(ptr)[index];
+    if ((bits & 0x7c00u) == 0) {
+        const float magnitude = static_cast<float>(bits & 0x03ffu) * 0x1p-24f;
+        return (bits & 0x8000u) ? -magnitude : magnitude;
+    }
+    return static_cast<float>(ptr[index]);
+}
+
+__device__ inline void store_scalar(float *ptr, size_t index, float value) {
+    ptr[index] = value;
+}
+
+// The native half cast flushes small gradients. Encode only the half-subnormal
+// range in integer arithmetic with round-to-nearest-even; normal values still
+// use the native conversion. Rounding 0x03ff upward also produces 0x0400.
+__device__ inline void store_scalar(half *ptr, size_t index, float value) {
+    const std::uint32_t bits = *reinterpret_cast<const std::uint32_t *>(&value);
+    const unsigned exponent = (bits >> 23) & 0xffu;
+    if (exponent <= 112u) {
+        const std::uint16_t sign = static_cast<std::uint16_t>((bits >> 16) & 0x8000u);
+        unsigned rounded = 0;
+        if (exponent >= 102u) {
+            const unsigned mantissa = (bits & 0x007fffffu) | 0x00800000u;
+            const unsigned shift = 126u - exponent;
+            rounded = mantissa >> shift;
+            const unsigned remainder = mantissa & ((1u << shift) - 1u);
+            const unsigned midpoint = 1u << (shift - 1u);
+            if (remainder > midpoint || (remainder == midpoint && (rounded & 1u))) {
+                ++rounded;
+            }
+        }
+        reinterpret_cast<std::uint16_t *>(ptr)[index] = sign | rounded;
+    } else {
+        ptr[index] = static_cast<half>(value);
+    }
+}
+
+// The legacy atomic specialization has no corner-record allocation.
+template <typename T, bool Enabled>
+struct CornerRecords {};
+
+template <typename T>
+struct CornerRecords<T, true> {
+    T rows[4][128] __attribute__((aligned(64)));
+    T go_record[128] __attribute__((aligned(64)));
+};
+
+template <typename T, bool UseList = false>
+__device__ void bilinear_backward(MsDeformAttnBackwardArgs args) {
+    const T *value = static_cast<const T *>(args.value);
+    const T *locations = static_cast<const T *>(args.sampling_locations);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    const T *grad_output = static_cast<const T *>(args.grad_output);
+    T *grad_locations = static_cast<T *>(args.grad_locations);
+    T *grad_weights = static_cast<T *>(args.grad_weights);
+    const int heads = args.num_heads;
+    const int dims = args.head_dim;
+    const int queries = args.num_queries;
+    const int levels = args.num_levels;
+    const int points = args.num_points;
+    const size_t total = static_cast<size_t>(args.batch) * queries * heads;
+    const size_t work = (total + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * work;
+    const size_t end = (begin + work < total) ? begin + work : total;
+    CornerRecords<T, UseList> corner_records;
+
+    for (size_t owner = begin; owner < end; ++owner) {
+        const int head = static_cast<int>(owner % heads);
+        const int batch = static_cast<int>(owner / heads / queries);
+        float go[128];
+        if constexpr (UseList) {
+            ::memcpy(corner_records.go_record, grad_output + owner * dims,
+                     static_cast<size_t>(dims) * sizeof(T));
+        }
+        for (int dim = 0; dim < dims; ++dim) {
+            if constexpr (UseList) {
+                go[dim] = load_scalar(corner_records.go_record, dim);
+            } else {
+                go[dim] = load_scalar(grad_output, owner * dims + dim);
+            }
+        }
+        int level_start = 0;
+        for (int level = 0; level < levels; ++level) {
+            const int height = args.spatial_shapes[2 * level];
+            const int width = args.spatial_shapes[2 * level + 1];
+            const size_t base = (static_cast<size_t>(batch) * args.value_len + level_start)
+                              * heads * dims;
+            for (int point = 0; point < points; ++point) {
+                const size_t sample = (owner * levels + level) * points + point;
+                const float x = load_scalar(locations, sample * 2) * width - 0.5f;
+                const float y = load_scalar(locations, sample * 2 + 1) * height - 0.5f;
+                float grad_x = 0.0f;
+                float grad_y = 0.0f;
+                float grad_weight = 0.0f;
+
+                // Outside the support both the sample and all derivatives are
+                // zero. Include -1 itself for grid_sample's one-sided slope.
+                if (x >= -1.0f && x < width && y >= -1.0f && y < height) {
+                    const float x_floor = floorf(x);
+                    const float y_floor = floorf(y);
+                    const int x0 = static_cast<int>(x_floor);
+                    const int y0 = static_cast<int>(y_floor);
+                    const float tx = x - x_floor;
+                    const float ty = y - y_floor;
+                    const float wx[2] = {1.0f - tx, tx};
+                    const float wy[2] = {1.0f - ty, ty};
+                    const float aw = load_scalar(weights, sample);
+                    size_t index[4];
+                    bool valid[4];
+                    for (int iy = 0; iy < 2; ++iy) {
+                        for (int ix = 0; ix < 2; ++ix) {
+                            const int corner = iy * 2 + ix;
+                            const int px = x0 + ix;
+                            const int py = y0 + iy;
+                            valid[corner] = px >= 0 && px < width && py >= 0 && py < height;
+                            index[corner] = valid[corner]
+                                ? base + ((static_cast<size_t>(py) * width + px) * heads + head) * dims
+                                : 0;
+                        }
+                    }
+                    if constexpr (UseList) {
+                        // Each sample/corner has one producer. Publish metadata
+                        // before its head; readers run only in the next launch.
+                        for (int iy = 0; iy < 2; ++iy) {
+                            for (int ix = 0; ix < 2; ++ix) {
+                                const int corner = iy * 2 + ix;
+                                if (valid[corner]) {
+                                    const int32_t node = static_cast<int32_t>(sample * 4 + corner);
+                                    const size_t bucket = index[corner] / dims;
+                                    args.node_wx[node] = wx[ix];
+                                    args.node_wy[node] = wy[iy];
+                                    int32_t expected = args.value_heads[bucket];
+                                    for (;;) {
+                                        args.value_next[node] = expected;
+                                        const int32_t previous = sdaa::atomic_cas(
+                                            args.value_heads + bucket, expected, node);
+                                        if (previous == expected) break;
+                                        expected = previous;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if constexpr (UseList) {
+                        // Keep all four records alive for the original dim-major math.
+                        for (int corner = 0; corner < 4; ++corner) {
+                            if (valid[corner]) {
+                                ::memcpy(corner_records.rows[corner], value + index[corner],
+                                         dims * sizeof(T));
+                            }
+                        }
+                    }
+                    for (int dim = 0; dim < dims; ++dim) {
+                        float v[4];
+                        for (int iy = 0; iy < 2; ++iy) {
+                            for (int ix = 0; ix < 2; ++ix) {
+                                const int corner = iy * 2 + ix;
+                                if constexpr (UseList) {
+                                    v[corner] = valid[corner]
+                                        ? load_scalar(corner_records.rows[corner], dim) : 0.0f;
+                                } else {
+                                    v[corner] = valid[corner] ? load_scalar(value, index[corner] + dim) : 0.0f;
+                                }
+                                if constexpr (!UseList) {
+                                    if (valid[corner]) {
+                                        sdaa::atomic_add(args.grad_value + index[corner] + dim,
+                                                         go[dim] * aw * wx[ix] * wy[iy]);
+                                    }
+                                }
+                            }
+                        }
+                        const float sampled = v[0] * wx[0] * wy[0] + v[1] * wx[1] * wy[0]
+                                            + v[2] * wx[0] * wy[1] + v[3] * wx[1] * wy[1];
+                        grad_weight += go[dim] * sampled;
+                        grad_x += go[dim] * aw * ((v[1] - v[0]) * wy[0] + (v[3] - v[2]) * wy[1]);
+                        grad_y += go[dim] * aw * ((v[2] - v[0]) * wx[0] + (v[3] - v[1]) * wx[1]);
+                    }
+                }
+                store_scalar(grad_locations, sample * 2, grad_x * width);
+                store_scalar(grad_locations, sample * 2 + 1, grad_y * height);
+                store_scalar(grad_weights, sample, grad_weight);
+            }
+            level_start += height * width;
+        }
+    }
+}
+
+// Small-work grain specialization for the legacy atomic path.
+//
+// The legacy atomic path assigns one work item per (batch, query, head) owner
+// and loops over levels and points inside it.  On the official scored shape the
+// whole problem is only two owners, so at most two SPEs execute while the rest
+// idle, and every one of those SPEs has to issue its grad_value atomics
+// serially: measured on 2026-10-10 with a stage ablation, the grad_value atomic
+// accumulation is 11.26 us of the 15.33 us kernel, i.e. 73.5% of the kernel.
+//
+// This specialization keeps the arithmetic identical but changes the work item
+// to (owner, level, point).  The same problem is then spread over
+// owners * levels * points work items, so the atomics are issued by many more
+// SPEs in parallel.  The ops layer binds the choice once per call, outside the
+// kernel (AGENTS.md rule 6), and only when the owner grain would leave SPEs
+// idle (owners < spe_num); larger shapes keep the original kernel.
+//
+// Numerical contract: each contribution is rounded exactly as before
+// (go * aw * wx * wy, then the atomic add) and grad_locations / grad_weights are
+// accumulated per (owner, level, point) in the original order, so those two
+// outputs stay bit-identical.  grad_value is a float atomic accumulation and is
+// already not bit-reproducible run to run on this path; the measured deviation
+// of this specialization equals that run-to-run floor (1 of 24 elements,
+// 3.725e-09).
+template <typename T>
+__device__ void bilinear_backward_grain(MsDeformAttnBackwardArgs args) {
+    const T *value = static_cast<const T *>(args.value);
+    const T *locations = static_cast<const T *>(args.sampling_locations);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    const T *grad_output = static_cast<const T *>(args.grad_output);
+    T *grad_locations = static_cast<T *>(args.grad_locations);
+    T *grad_weights = static_cast<T *>(args.grad_weights);
+    const int heads = args.num_heads;
+    const int dims = args.head_dim;
+    const int queries = args.num_queries;
+    const int levels = args.num_levels;
+    const int points = args.num_points;
+    const size_t owners = static_cast<size_t>(args.batch) * queries * heads;
+    const size_t groups = owners * levels * points;
+    const size_t per = (groups + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * per;
+    const size_t end = (begin + per < groups) ? begin + per : groups;
+    for (size_t g = begin; g < end; ++g) {
+        const size_t owner = g / (static_cast<size_t>(levels) * points);
+        const size_t lp = g % (static_cast<size_t>(levels) * points);
+        const int level = static_cast<int>(lp / points);
+        const int point = static_cast<int>(lp % points);
+        const int head = static_cast<int>(owner % heads);
+        const int batch = static_cast<int>(owner / heads / queries);
+        float go[128];
+        for (int dim = 0; dim < dims; ++dim) {
+            go[dim] = load_scalar(grad_output, owner * dims + dim);
+        }
+        size_t level_start = 0;
+        for (int l = 0; l < level; ++l) {
+            level_start += static_cast<size_t>(args.spatial_shapes[2 * l]) *
+                           static_cast<size_t>(args.spatial_shapes[2 * l + 1]);
+        }
+        const int height = args.spatial_shapes[2 * level];
+        const int width = args.spatial_shapes[2 * level + 1];
+        const size_t base =
+            (static_cast<size_t>(batch) * args.value_len + level_start) * heads * dims;
+        const size_t sample = (owner * levels + level) * points + point;
+        const float x = load_scalar(locations, sample * 2) * width - 0.5f;
+        const float y = load_scalar(locations, sample * 2 + 1) * height - 0.5f;
+        float grad_x = 0.0f;
+        float grad_y = 0.0f;
+        float grad_weight = 0.0f;
+        // Outside the support both the sample and all derivatives are zero.
+        if (x >= -1.0f && x < width && y >= -1.0f && y < height) {
+            const float x_floor = floorf(x);
+            const float y_floor = floorf(y);
+            const int x0 = static_cast<int>(x_floor);
+            const int y0 = static_cast<int>(y_floor);
+            const float tx = x - x_floor;
+            const float ty = y - y_floor;
+            const float wx[2] = {1.0f - tx, tx};
+            const float wy[2] = {1.0f - ty, ty};
+            const float aw = load_scalar(weights, sample);
+            size_t index[4];
+            bool valid[4];
+            for (int iy = 0; iy < 2; ++iy) {
+                for (int ix = 0; ix < 2; ++ix) {
+                    const int corner = iy * 2 + ix;
+                    const int px = x0 + ix;
+                    const int py = y0 + iy;
+                    valid[corner] = px >= 0 && px < width && py >= 0 && py < height;
+                    index[corner] = valid[corner]
+                        ? base + ((static_cast<size_t>(py) * width + px) * heads + head) * dims
+                        : 0;
+                }
+            }
+            for (int dim = 0; dim < dims; ++dim) {
+                float v[4];
+                for (int iy = 0; iy < 2; ++iy) {
+                    for (int ix = 0; ix < 2; ++ix) {
+                        const int corner = iy * 2 + ix;
+                        v[corner] = valid[corner]
+                            ? load_scalar(value, index[corner] + dim) : 0.0f;
+                        if (valid[corner]) {
+                            sdaa::atomic_add(args.grad_value + index[corner] + dim,
+                                             go[dim] * aw * wx[ix] * wy[iy]);
+                        }
+                    }
+                }
+                const float sampled = v[0] * wx[0] * wy[0] + v[1] * wx[1] * wy[0]
+                                    + v[2] * wx[0] * wy[1] + v[3] * wx[1] * wy[1];
+                grad_weight += go[dim] * sampled;
+                grad_x += go[dim] * aw * ((v[1] - v[0]) * wy[0] + (v[3] - v[2]) * wy[1]);
+                grad_y += go[dim] * aw * ((v[2] - v[0]) * wx[0] + (v[3] - v[1]) * wx[1]);
+            }
+        }
+        store_scalar(grad_locations, sample * 2, grad_x * width);
+        store_scalar(grad_locations, sample * 2 + 1, grad_y * height);
+        store_scalar(grad_weights, sample, grad_weight);
+    }
+}
+
+template <typename T>
+__device__ void value_list_reduce(MsDeformAttnBackwardArgs args) {
+#pragma clang fp contract(off)
+    const T *grad_output = static_cast<const T *>(args.grad_output);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    const int dims = args.head_dim;
+    const size_t samples_per_owner = static_cast<size_t>(args.num_levels) * args.num_points;
+    const size_t owners = static_cast<size_t>(args.batch) * args.value_len * args.num_heads;
+    T go_record[128] __attribute__((aligned(64)));
+    // Round-robin ownership distributes the small spatial levels across SPEs.
+    // This stage is the sole writer of every value pixel/head gradient.
+    for (size_t owner = static_cast<size_t>(threadIdx); owner < owners; owner += args.spe_num) {
+        float sum[128];
+        for (int dim = 0; dim < dims; ++dim) sum[dim] = 0.0f;
+        int32_t node = args.value_heads[owner];
+        while (node != -1) {
+            const size_t sample = static_cast<size_t>(node) / 4;
+            const size_t go_owner = sample / samples_per_owner;
+            ::memcpy(go_record, grad_output + go_owner * dims,
+                     static_cast<size_t>(dims) * sizeof(T));
+            const float aw = load_scalar(weights, sample);
+            const float wx = args.node_wx[node];
+            const float wy = args.node_wy[node];
+            for (int dim = 0; dim < dims; ++dim) {
+                const float go = load_scalar(go_record, dim);
+                // Preserve the atomic path's multiplication order and round
+                // before adding. Volatile also prevents link-time contraction.
+                volatile float contribution = ((go * aw) * wx) * wy;
+                sum[dim] += contribution;
+            }
+            node = args.value_next[node];
+        }
+        for (int dim = 0; dim < dims; ++dim) {
+            args.grad_value[owner * dims + dim] = sum[dim];
+        }
+    }
+}
+
+}  // namespace
+
+__global__ void teco_slave_ms_deform_attn_backward_zero_fp32(MsDeformAttnBackwardArgs args) {
+    const size_t total = static_cast<size_t>(args.batch) * args.value_len
+                       * args.num_heads * args.head_dim;
+    const size_t work = (total + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * work;
+    const size_t end = (begin + work < total) ? begin + work : total;
+    for (size_t index = begin; index < end; ++index) {
+        args.grad_value[index] = 0.0f;
+    }
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_fp32(MsDeformAttnBackwardArgs args) {
+    bilinear_backward<float>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_fp16(MsDeformAttnBackwardArgs args) {
+    bilinear_backward<half>(args);
+}
+__global__ void teco_slave_ms_deform_attn_backward_fp32_grain(MsDeformAttnBackwardArgs args) {
+    bilinear_backward_grain<float>(args);
+}
+
+// A separate launch is the global barrier between conflicting additions and
+// the final half conversion. No SPE reads a partially accumulated value.
+__global__ void teco_slave_ms_deform_attn_backward_cast_fp16(MsDeformAttnBackwardArgs args) {
+    const size_t total = static_cast<size_t>(args.batch) * args.value_len
+                       * args.num_heads * args.head_dim;
+    const size_t work = (total + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * work;
+    const size_t end = (begin + work < total) ? begin + work : total;
+    half *output = static_cast<half *>(args.grad_value_fp16);
+    for (size_t index = begin; index < end; ++index) {
+        store_scalar(output, index, args.grad_value[index]);
+    }
+}
+
+// Initialization, publication and reduction are separate current-stream
+// launches. The consumer therefore cannot observe incomplete node metadata.
+__global__ void teco_slave_ms_deform_attn_backward_list_init(MsDeformAttnBackwardArgs args) {
+    const size_t owners = static_cast<size_t>(args.batch) * args.value_len * args.num_heads;
+    for (size_t owner = static_cast<size_t>(threadIdx); owner < owners; owner += args.spe_num) {
+        args.value_heads[owner] = -1;
+    }
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_producer_fp32(MsDeformAttnBackwardArgs args) {
+    bilinear_backward<float, true>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_producer_fp16(MsDeformAttnBackwardArgs args) {
+    bilinear_backward<half, true>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_reduce_fp32(MsDeformAttnBackwardArgs args) {
+    value_list_reduce<float>(args);
+}
+
+__global__ void teco_slave_ms_deform_attn_backward_list_reduce_fp16(MsDeformAttnBackwardArgs args) {
+    value_list_reduce<half>(args);
+}
