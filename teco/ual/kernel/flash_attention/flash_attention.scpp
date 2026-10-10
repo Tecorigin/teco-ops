@@ -348,7 +348,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 // Step B: o_accum: O *= exp(m_old - m_new)
                 for (int ri = 0; ri < cur_BM; ri++) {
                     float s = scale[ri];
-                    if constexpr (BM == 32 || BM == 128) {
+                    if constexpr (BM == 32 || BM == 64 || BM == 128) {
                         floatv16 vscale = s;
                         float *row = o_accum + ri * BK;
                         for (int rk = 0; rk < BK; rk += 16) {
@@ -436,7 +436,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
 
                     // Step E: o_accum[i][hb*32 + k] += outO[i][k]
                     for (int ai = 0; ai < cur_BM; ai++) {
-                        if constexpr (BM == 32 || BM == 128) {
+                        if constexpr (BM == 32 || BM == 64 || BM == 128) {
                             float *dst = o_accum + ai * BK + hb * gemm_bn;
                             float *src = outO + ai * gemm_bn;
                             for (int ak = 0; ak < 32; ak += 16) {
