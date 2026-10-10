@@ -220,11 +220,21 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                               kv_head_idx , args.local_kv_head_num, args.block_size,
                               args.size_per_head, cur_BN);
 
-                // transpose ktmp[cur_BN, head_size] -> kbuf[head_size, cur_BN]
-                //   kbuf[h*BN + t] = ktmp[t*head_size + h]
-                for (int t = 0; t < cur_BN; t++) {
-                    for (int h = 0; h < args.size_per_head; h++) {
-                        kbuf[h * BN + t] = ktmp[t * args.size_per_head + h];
+                // PROBE: same permutation, h-outer so the kbuf side is a contiguous
+                // halfv16 store instead of a stride-BN scalar scatter.
+                for (int h = 0; h < args.size_per_head; h++) {
+                    half *dst_row = kbuf + h * BN;
+                    int t = 0;
+                    for (; t <= cur_BN - 16; t += 16) {
+                        halfv16 v;
+                        half *vp = (half *)&v;
+                        for (int u = 0; u < 16; u++) {
+                            vp[u] = ktmp[(t + u) * args.size_per_head + h];
+                        }
+                        simd_store(v, dst_row + t);
+                    }
+                    for (; t < cur_BN; t++) {
+                        dst_row[t] = ktmp[t * args.size_per_head + h];
                     }
                 }
 
