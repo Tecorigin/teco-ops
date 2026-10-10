@@ -155,9 +155,21 @@ __device__ void online_softmax_step(
 template <int BM>
 __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
     int tid = threadIdx;
-    if (tid >= MIN(args.spe_num, args.local_head_num)) {
+    // SPE work split (D128 / BM == 128 only): the Q blocks of one (batch, head) are fully
+    // independent - each keeps its own online-softmax scan and writes disjoint output rows -
+    // so when the SPE array is wider than the local head count they can be spread over
+    // several SPEs instead of leaving (spe_num - local_head_num) SPEs idle.  parts == 1
+    // reproduces the previous mapping exactly.  Data-driven trip count bound once at entry
+    // from the launch shape: no branch inside the per-tile loops, no implementation switch.
+    int parts = 1;
+    if constexpr (BM == 128) {
+        parts = MAX(1, MIN(2, args.spe_num / args.local_head_num));
+    }
+    if (tid >= MIN(args.spe_num, args.local_head_num * parts)) {
         return;
     }
+    int head = tid / parts;
+    int part = tid % parts;
     int num_kv_groups = args.local_head_num / args.local_kv_head_num;
 
     int BN = 32;    // N block, 32 for ace; block_size
@@ -188,7 +200,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
         }
         memcpy(ldm_block_table, args.block_table + b * args.block_table_dim,
                args.block_table_dim * sizeof(int));
-        for (int i = 0; i < q_full_end; i += BM) {
+        for (int i = part * BM; i < q_full_end; i += parts * BM) {
             int cur_BM_q = MIN(BM, q_seq_len - i);
 
             // init online softmax state for this Q block
@@ -206,7 +218,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
             int cur_BM = MIN(BM, q_seq_len - i);
             half * src_q_ptr = (half *)args.q +
                                (cur_q_index + i) * (args.local_head_num * args.size_per_head) +
-                               tid * args.size_per_head;
+                               head * args.size_per_head;
             size_t q_src_stride = (args.local_head_num - 1) * token_size;
             memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
 
@@ -235,7 +247,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 int cur_BN = MIN(BN, k_seq_len - j);
 
                 // load k [cur_BN, size_per_head] -> ktmp
-                int kv_head_idx = tid / num_kv_groups;                  // GQA
+                int kv_head_idx = head / num_kv_groups;                 // GQA
                 int cur_block = j / args.block_size;                    // BN == block_size
                 load_kv_cache(ktmp, (const half *)args.key_cache, ldm_block_table, cur_block,
                               kv_head_idx , args.local_kv_head_num, args.block_size,
@@ -486,7 +498,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
             size_t o_dst_stride = (args.local_head_num - 1) * token_size;
             half *out_base = (half *)args.fmha_out +
                              (cur_q_index + i) * args.local_head_num * args.size_per_head +
-                             tid * args.size_per_head;
+                             head * args.size_per_head;
             memcpy_stride(out_base, obuf, rel_obuf_size, token_size, {o_dst_stride, 0});
         }
 
