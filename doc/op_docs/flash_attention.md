@@ -292,8 +292,19 @@ tecoops.flash_attn_varlen_func(
 
 BM32/D512 的 Step B 用 `floatv16` 逐元素重缩放 FP32 累加器，Step E 用
 `floatv16` 累加 SV。两项机制分别验证；逐元素数学顺序、softmax、FP16
-packing、DMA、SPM 分配和 ABI 保持原实现。BM64/BM128 保留标量路径，
+packing、DMA、SPM 分配和 ABI 保持原实现。BM64 保留标量路径，
 特化在编译期选择。
+
+同一对逐元素循环的 `floatv16` 形式已按相同机制推广到 `BM == 128`
+（ALGO0；D64/D128，服务 InternVL3_5-8B 与 MiniCPM5-1B 的算子目标）：
+`flash_attention.scpp:295`（Step B）与 `:378`（Step E）的编译期守卫由
+`if constexpr (BM == 32)` 放宽为 `if constexpr (BM == 32 || BM == 128)`，
+`floatv16` 实体逐字未改。该改动只改变每条指令搬运的元素个数，不改变逐元素
+算术、加法顺序、`softmax_scale`、causal mask、`l_block` 求和顺序、DMA、
+SPM 分配或 ABI；BM64/D256 仍走标量路径。CPU 端按位等价模型（scalar vs
+16-wide，含负向对照）与设备端 baseline/candidate `uint16` 逐位比对各自独立
+验证，详见 `flash_attention_bm128_simd_20261010.md`。
+**仅算子级收益，不主张端到端或模型级增益。**
 
 Gemma 独立测试使用 FP16 Q[N,8,512]、KV[blocks,1,32,512]、scale=1、
 N=1/4/8、KV=33..4352。每项均通过 80 个 paired decode 和 8 个 paired
