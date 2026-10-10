@@ -241,12 +241,16 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                 {
                     MatmulConfig matmul_cfg;
                     Matmul matmul(matmul_cfg);
+                    int gemm_m = BM;
+                    if constexpr (BM == 32) {
+                        gemm_m = cur_BM;
+                    }
                     auto tensorQ = make_tensor<2>((half *)qbuf,
-                        {static_cast<size_t>(BM), static_cast<size_t>(args.size_per_head)});
+                        {static_cast<size_t>(gemm_m), static_cast<size_t>(args.size_per_head)});
                     auto tensorK = make_tensor<2>((half *)kbuf,
                         {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
                     auto tensorC = make_tensor<2>((float *)outc,
-                        {static_cast<size_t>(BM), static_cast<size_t>(BN)});
+                        {static_cast<size_t>(gemm_m), static_cast<size_t>(BN)});
 
                     matmul.compute_async<MatmulBlockConfig::M128_N32>(
                         tensorQ, tensorK, /*is_lastk=*/true);
@@ -358,9 +362,13 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
 
                     MatmulConfig cfg;
                     Matmul matmul(cfg);
-                    auto tP = make_tensor<2>(p_score, {(size_t)BM, (size_t)BN});
+                    int gemm_m2 = BM;
+                    if constexpr (BM == 32) {
+                        gemm_m2 = cur_BM;
+                    }
+                    auto tP = make_tensor<2>(p_score, {(size_t)gemm_m2, (size_t)BN});
                     auto tV = make_tensor<2>(vbuf, {(size_t)BN, (size_t)gemm_bn});
-                    auto tO = make_tensor<2>((float *)outO, {(size_t)BM, (size_t)gemm_bn});
+                    auto tO = make_tensor<2>((float *)outO, {(size_t)gemm_m2, (size_t)gemm_bn});
                     matmul.compute_async<MatmulBlockConfig::M128_N32>(tP, tV, true);
                     matmul.storeC_spm_async(tO);
                     matmul.wait_storeC(1);
