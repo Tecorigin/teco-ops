@@ -296,7 +296,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                         }
                     } else {
                         int gemm_m = BM;
-                        if constexpr (BM == 128) {
+                        if constexpr (BM == 128 || BM == 64) {
                             gemm_m = cur_BM;
                         }
                         auto tensorQ = make_tensor<2>((half *)qbuf,
@@ -424,7 +424,7 @@ __device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
                     MatmulConfig cfg;
                     Matmul matmul(cfg);
                     int gemm_m2 = BM;
-                    if constexpr (BM == 32 || BM == 128) {
+                    if constexpr (BM == 32 || BM == 64 || BM == 128) {
                         gemm_m2 = cur_BM;
                     }
                     auto tP = make_tensor<2>(p_score, {(size_t)gemm_m2, (size_t)BN});
