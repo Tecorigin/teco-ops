@@ -42,6 +42,15 @@ int findFlashAttentionBranch(const FlashAttentionPatchArgs *args) {
         return 1;
     }
     if (head_dim == 512) {
+        // The D512 entry is flash_attention_half<32>: it tiles K/V with BN == 32 and derives
+        // the paged block index as j / block_size, so any block size other than 32 is already
+        // outside its contract.  Reject it here (fail closed) instead of silently computing
+        // wrong results; findImpl() turns -1 into Status::NOT_IMPLEMENTED.
+        if (args->rvargs->block_size != 32) {
+            ERROR("flash_attention D512 needs block_size == 32, got %d\n",
+                  args->rvargs->block_size);
+            return -1;
+        }
         return 2;
     }
 
