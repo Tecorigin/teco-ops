@@ -1,0 +1,169 @@
+// BSD 3-Clause License
+//
+// Copyright (c) 2026, Tecorigin Co., Ltd.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from this
+//    software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+
+//
+// teco_slave_rotary_embedding_fp16 -- fused NeoX rotary embedding for q and k.
+//
+// Replaces the reference chain (vLLM 0.20.2; SDAA has no PrivateUse1 rotary
+// implementation, so CustomOp dispatches to forward_native):
+//     cos_sin = cos_sin_cache.index_select(0, positions)   # fp16 [T, D]
+//     cos, sin = cos_sin.chunk(2, dim=-1)                  # fp16 [T, D/2]
+//     x = q.view(T, Hq, D); x1, x2 = torch.chunk(x, 2, dim=-1)
+//     o1 = x1 * cos - x2 * sin                             # fp16 ops
+//     o2 = x2 * cos + x1 * sin
+//     q_out = torch.cat((o1, o2), dim=-1).reshape(q.shape)
+// plus the same for k, and cos/sin for every head of a token.  All operands are
+// fp16, so each multiply / add / subtract rounds to fp16 exactly once.  This
+// kernel reproduces that rounding sequence element by element:
+//     t1 = f16(f32(x1)*f32(c)); t2 = f16(f32(x2)*f32(s)); o1 = f16(f32(t1)-f32(t2))
+//     t3 = f16(f32(x2)*f32(c)); t4 = f16(f32(x1)*f32(s)); o2 = f16(f32(t3)+f32(t4))
+// Both products are materialised as fp16 vectors before the add/subtract, so no
+// FMA contraction can cross an fp16 rounding.
+//
+// Parallelisation: the work unit is one (token, head) row of D halves; the rows
+// of q and k are walked with a stride of spe_num.  One launch covers both.
+//
+// Data path: HBM -> SPM (memcpy_async + memcpy_wait) -> SIMD epilogue -> SPM ->
+// HBM, i.e. the same structure as the delivered teco_slave_rms_norm_fp16.
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/macro.h"
+#include "ual/kernel/rotary_embedding/rotary_embedding.h"
+
+using namespace tecoops::ual::args;  // NOLINT
+using namespace sdaa;                 // NOLINT
+
+// One (x1, x2) pair with its cos/sin, rounding to fp16 after every operation.
+__device__ __always_inline void rotary_pair_fp16(half x1, half x2, half c, half s,
+                                                 half *o1, half *o2) {
+    const half t1 = static_cast<half>(static_cast<float>(x1) * static_cast<float>(c));
+    const half t2 = static_cast<half>(static_cast<float>(x2) * static_cast<float>(s));
+    const half t3 = static_cast<half>(static_cast<float>(x2) * static_cast<float>(c));
+    const half t4 = static_cast<half>(static_cast<float>(x1) * static_cast<float>(s));
+    *o1 = static_cast<half>(static_cast<float>(t1) - static_cast<float>(t2));
+    *o2 = static_cast<half>(static_cast<float>(t3) + static_cast<float>(t4));
+}
+
+// One row of D halves: cos/sin cover the first D/2 entries of the row.
+__device__ __always_inline void rotary_row_fp16(const half *x, const half *c, const half *s,
+                                                half *out, int D) {
+    const int H = D >> 1;
+    int d = 0;
+    for (; d + 16 <= H; d += 16) {
+        float16v16 xa, xb, cv, sv;
+        simd_loadu(xa, x + d);
+        simd_loadu(xb, x + d + H);
+        simd_loadu(cv, c + d);
+        simd_loadu(sv, s + d);
+        const floatv16 fa = simd_vfcvths(xa);
+        const floatv16 fb = simd_vfcvths(xb);
+        const floatv16 fc = simd_vfcvths(cv);
+        const floatv16 fs = simd_vfcvths(sv);
+        const float16v16 t1 = simd_vfcvtsh(fa * fc);
+        const float16v16 t2 = simd_vfcvtsh(fb * fs);
+        const float16v16 t3 = simd_vfcvtsh(fb * fc);
+        const float16v16 t4 = simd_vfcvtsh(fa * fs);
+        const float16v16 o1 = simd_vfcvtsh(simd_vfcvths(t1) - simd_vfcvths(t2));
+        const float16v16 o2 = simd_vfcvtsh(simd_vfcvths(t3) + simd_vfcvths(t4));
+        simd_storeu(o1, out + d);
+        simd_storeu(o2, out + d + H);
+    }
+    for (; d < H; ++d) {
+        half o1 = static_cast<half>(0.0f);
+        half o2 = static_cast<half>(0.0f);
+        rotary_pair_fp16(x[d], x[d + H], c[d], s[d], &o1, &o2);
+        out[d] = o1;
+        out[d + H] = o2;
+    }
+}
+
+__global__ void teco_slave_rotary_embedding_fp16(RotaryEmbeddingArgs args) {
+    const int tid = threadIdx;
+    const int spe_num = args.spe_num;
+    if (spe_num <= 0) return;
+
+    const int D = args.head_dim;
+    const int H = D >> 1;
+    const int T = args.num_tokens;
+    const int Hq = args.num_q_heads;
+    const int Hk = args.num_kv_heads;
+
+    const half *q = static_cast<const half *>(args.q);
+    const half *k = static_cast<const half *>(args.k);
+    const half *cache = static_cast<const half *>(args.cos_sin_cache);
+    const int64_t *positions = args.positions;
+    half *q_out = static_cast<half *>(args.q_out);
+    half *k_out = static_cast<half *>(args.k_out);
+
+    const int Rq = T * Hq;
+    const int R = Rq + T * Hk;
+    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
+    const size_t cs_bytes = static_cast<size_t>(H) * sizeof(half);
+
+    const size_t spm_bytes = static_cast<size_t>(2 * D + 2 * H) * sizeof(half);
+    half *spm = static_cast<half *>(rt_spm_malloc(spm_bytes));
+    half *xin = spm;
+    half *xout = xin + D;
+    half *cbuf = xout + D;
+    half *sbuf = cbuf + H;
+
+    for (int r = tid; r < R; r += spe_num) {
+        const bool is_q = (r < Rq);
+        const int rr = is_q ? r : (r - Rq);
+        const int heads = is_q ? Hq : Hk;
+        const int t = rr / heads;
+        const int h = rr - t * heads;
+        const int64_t p = positions[t];
+        const size_t in_stride = static_cast<size_t>(is_q ? args.q_stride : args.k_stride);
+        const size_t out_stride = static_cast<size_t>(is_q ? args.q_out_stride : args.k_out_stride);
+        const half *src = (is_q ? q : k) + static_cast<size_t>(t) * in_stride
+                          + static_cast<size_t>(h) * static_cast<size_t>(D);
+        half *dst = (is_q ? q_out : k_out) + static_cast<size_t>(t) * out_stride
+                    + static_cast<size_t>(h) * static_cast<size_t>(D);
+        const half *cs = cache + static_cast<size_t>(p) * static_cast<size_t>(args.cache_stride);
+
+        MemcpyHandle get_x, get_c, get_s, put_x;
+        memcpy_async(xin, src, row_bytes, MemcpyGlobalToSpm, get_x);
+        memcpy_async(cbuf, cs, cs_bytes, MemcpyGlobalToSpm, get_c);
+        memcpy_async(sbuf, cs + H, cs_bytes, MemcpyGlobalToSpm, get_s);
+        memcpy_wait(get_x);
+        memcpy_wait(get_c);
+        memcpy_wait(get_s);
+
+        rotary_row_fp16(xin, cbuf, sbuf, xout, D);
+
+        memcpy_async(dst, xout, row_bytes, MemcpySpmToGlobal, put_x);
+        memcpy_wait(put_x);
+    }
+
+    rt_spm_free(spm);
+}

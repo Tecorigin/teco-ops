@@ -1,0 +1,11 @@
+syntax = "proto2";
+package testpt;
+
+// self-built case parameter block for the rotary_embedding op (task-8).
+// head_dim and the row strides are taken from the tensor shapes of the case;
+// these fields carry what the shapes cannot express.
+message RotaryEmbeddingParam{
+    optional int32 num_q_heads  = 1;
+    optional int32 num_kv_heads = 2;
+    optional int32 is_neox      = 3 [default = 1];
+}

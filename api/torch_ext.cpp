@@ -96,6 +96,60 @@ void rms_norm_torch(
                    num_tokens, hidden_size, static_cast<float>(eps));
 }
 
+void rotary_embedding_torch(
+    torch::Tensor q, torch::Tensor k, torch::Tensor cos_sin_cache, torch::Tensor positions,
+    torch::Tensor q_out, torch::Tensor k_out, bool is_neox) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the operator on the caller's current SDAA stream, like rms_norm.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+
+    TORCH_CHECK(q.dim() == 2 && k.dim() == 2,
+                "rotary_embedding: q and k must be 2-D [num_tokens, heads * head_dim]");
+    TORCH_CHECK(cos_sin_cache.dim() == 2,
+                "rotary_embedding: cos_sin_cache must be 2-D [max_position, head_dim]");
+    TORCH_CHECK(q.scalar_type() == torch::kHalf && k.scalar_type() == torch::kHalf &&
+                    cos_sin_cache.scalar_type() == torch::kHalf,
+                "rotary_embedding: q, k and cos_sin_cache must be fp16");
+    TORCH_CHECK(q_out.scalar_type() == torch::kHalf && k_out.scalar_type() == torch::kHalf,
+                "rotary_embedding: q_out and k_out must be fp16");
+    TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && cos_sin_cache.stride(-1) == 1,
+                "rotary_embedding: head dimension must be contiguous in q, k, cos_sin_cache");
+    // NeoX (half-split) layout only: fail closed instead of rotating the wrong pairs.
+    TORCH_CHECK(is_neox, "rotary_embedding: only the NeoX (half-split) layout is implemented");
+
+    const int64_t num_tokens = q.size(0);
+    const int64_t head_dim = cos_sin_cache.size(1);
+    TORCH_CHECK(k.size(0) == num_tokens && positions.numel() == num_tokens,
+                "rotary_embedding: q, k and positions must agree on num_tokens");
+    TORCH_CHECK(q_out.size(0) == num_tokens && k_out.size(0) == num_tokens,
+                "rotary_embedding: q_out and k_out must agree on num_tokens");
+    TORCH_CHECK(head_dim > 0 && (head_dim % 2) == 0,
+                "rotary_embedding: head_dim must be positive and even");
+    TORCH_CHECK(q.size(1) % head_dim == 0 && k.size(1) % head_dim == 0,
+                "rotary_embedding: head_dim must divide the fused head width");
+    TORCH_CHECK(q_out.size(1) == q.size(1) && k_out.size(1) == k.size(1),
+                "rotary_embedding: out tensors must keep the in-tensor head layout");
+
+    // positions is int64 in the model runner; .to(kLong) is a no-op when it already is.
+    auto pos = positions.is_contiguous() ? positions : positions.contiguous();
+    if (pos.scalar_type() != torch::kLong) {
+        pos = pos.to(torch::kLong);
+    }
+
+    tecoopsRotaryEmbedding(
+        handle,
+        q.data_ptr(), k.data_ptr(), cos_sin_cache.data_ptr(), pos.data_ptr<int64_t>(),
+        q_out.data_ptr(), k_out.data_ptr(),
+        static_cast<int>(num_tokens),
+        static_cast<int>(q.size(1) / head_dim),
+        static_cast<int>(k.size(1) / head_dim),
+        static_cast<int>(head_dim),
+        static_cast<int>(q.stride(0)), static_cast<int>(k.stride(0)),
+        static_cast<int>(q_out.stride(0)), static_cast<int>(k_out.stride(0)),
+        static_cast<int>(cos_sin_cache.stride(0)),
+        is_neox ? 1 : 0);
+}
+
 void flash_attn_varlen_func_torch(
     torch::Tensor q,
     torch::Tensor k,
@@ -211,5 +265,6 @@ PYBIND11_MODULE(_torch_ext, m) {
     m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
     m.def("flash_attn_varlen_func", &flash_attn_varlen_func_torch, "flash_attn_varlen_func (SDAA)");
+    m.def("rotary_embedding", &rotary_embedding_torch, "rotary_embedding (SDAA, fp16 NeoX)");
     m.def("causal_conv1d_fn_torch", &causal_conv1d_fn_torch, "causal_conv1d_fn_torch (SDAA)");
 }

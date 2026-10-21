@@ -153,6 +153,32 @@ tecoopsStatus_t tecoopsRmsNorm(
     int hidden_size,
     float eps);
 
+// Fused NeoX rotary position embedding for q and k (fp16, half-split layout).
+// One launch rotates num_tokens x num_q_heads q rows and num_tokens x num_kv_heads
+// k rows using cos_sin_cache[positions[t]]; every fp16 op is rounded to fp16 once,
+// so the output is bit-identical to the fp16 reference chain
+// (vLLM RotaryEmbedding.forward_static + ApplyRotaryEmb.forward_static).
+// Row strides are explicit so a fused-QKV slice is consumed without a copy.
+// q_out may alias q and k_out may alias k.  is_neox must be 1.
+tecoopsStatus_t tecoopsRotaryEmbedding(
+    tecoopsHandle_t handle,
+    const void *q,
+    const void *k,
+    const void *cos_sin_cache,
+    const int64_t *positions,
+    void *q_out,
+    void *k_out,
+    int num_tokens,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int q_stride,
+    int k_stride,
+    int q_out_stride,
+    int k_out_stride,
+    int cache_stride,
+    int is_neox);
+
 tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
                                       int max_seqlen_q, int max_seqlen_k,
                                       int max_block_num, const int *q_seq_lens,

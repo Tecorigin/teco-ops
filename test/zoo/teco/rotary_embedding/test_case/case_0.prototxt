@@ -1,0 +1,106 @@
+op_name: "rotary_embedding"
+
+# self-built case (task-8): MiniCPM5-1B decode geometry, T=1, dense q/k rows.
+# Hq=16, Hkv=2, head_dim=128, NeoX layout, fp16.
+
+input {
+  id: "q"
+  shape: {
+    dims: 1
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 42
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "k"
+  shape: {
+    dims: 1
+    dims: 256
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 43
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "cos_sin_cache"
+  shape: {
+    dims: 4096
+    dims: 128
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 44
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "positions"
+  shape: {
+    dims: 1
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT64
+  ttype: TENSOR
+  random_data: {
+    seed: 45
+    upper_bound: 1024.0
+    lower_bound: 0.0
+    distribution: UNIFORM
+  }
+}
+
+output {
+  id: "q_out"
+  shape: {
+    dims: 1
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+output {
+  id: "k_out"
+  shape: {
+    dims: 1
+    dims: 256
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+tecokernel_param: {
+  rotary_embedding_param: {
+    num_q_heads: 16
+    num_kv_heads: 2
+    is_neox: 1
+  }
+}
+
+test_param: {
+    error_func: DIFF1
+    error_threshold: 1e-4
+}

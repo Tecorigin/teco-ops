@@ -1,0 +1,110 @@
+op_name: "rotary_embedding"
+
+# Hy-MT2-1.8B decode geometry (task-14, new directory -- the MiniCPM cases in
+# test_case/ are untouched).  Hq=16, Hkv=4, head_dim=128, NeoX, fp16.
+# q/k keep the REAL fused-QKV row stride (16*128 + 2*4*128 = 3072) while the
+# outputs are dense (2048/512), i.e. in_stride != out_stride, exactly what
+# hunyuan_v1.py:236-238 hands to the rope layer.  No generated case_hy_0/
+# directory is created, so the demo runs its in-process C++ reference.
+
+input {
+  id: "q"
+  shape: {
+    dims: 1
+    dims: 3072
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 142
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "k"
+  shape: {
+    dims: 1
+    dims: 3072
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 143
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "cos_sin_cache"
+  shape: {
+    dims: 4096
+    dims: 128
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 144
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "positions"
+  shape: {
+    dims: 1
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT64
+  ttype: TENSOR
+  random_data: {
+    seed: 145
+    upper_bound: 1024.0
+    lower_bound: 0.0
+    distribution: UNIFORM
+  }
+}
+
+output {
+  id: "q_out"
+  shape: {
+    dims: 1
+    dims: 2048
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+output {
+  id: "k_out"
+  shape: {
+    dims: 1
+    dims: 512
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+tecokernel_param: {
+  rotary_embedding_param: {
+    num_q_heads: 16
+    num_kv_heads: 4
+    is_neox: 1
+  }
+}
+
+test_param: {
+    error_func: DIFF1
+    error_threshold: 1e-4
+}
