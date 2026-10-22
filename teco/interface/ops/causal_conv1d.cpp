@@ -36,9 +36,33 @@ using tecoops::ual::args::CausalConv1dArgs;
 using tecoops::ual::args::CausalConv1dPatchArgs;
 using tecoops::ual::ops::CausalConv1dOp;
 
+////  Fail-closed alignment guard for the 16-lane vector kernel.
+////
+////  The SIMD main loop issues 32 B simd_load/simd_store at element offsets
+////  {t*xSeqStride, t*outSeqStride, k*dim, w*dim} + 16*blk, so a legal launch
+////  requires dim AND all three row strides (xSeqStride / outSeqStride /
+////  convStateStride) to be multiples of 16 halves.  A non-aligned shape used to
+////  reach the kernel and abort the whole process with
+////  SDAA_ERROR_MISALIGNED_ADDRESS (SIGABRT, rc=134 during warmup).  Reject it
+////  here instead, in the host-side parameter-validation layer: nothing is
+////  enqueued, the caller gets TECOOPS_STATUS_BAD_PARAM (RuntimeError in the
+////  python binding), and the kernel keeps zero defensive branches in its hot
+////  path (AGENTS.md rule 6 -- the decision is made once per call, outside the
+////  kernel).  The scalar-dispatch fix for these shapes is deliberately NOT part
+////  of this PR: it adds a __global__ symbol and therefore shifts the device
+////  image (layout tax), see doc/op_docs/causal_conv1d.md.
+static tecoopsStatus_t checkCausalConv1dAlignment(int dim, int convStateStride,
+                                                   int xSeqStride, int outSeqStride) {
+    const bool aligned = ((dim & 15) == 0) && ((convStateStride & 15) == 0) &&
+                         ((xSeqStride & 15) == 0) && ((outSeqStride & 15) == 0);
+    return aligned ? TECOOPS_STATUS_SUCCESS : TECOOPS_STATUS_BAD_PARAM;
+}
+
 static tecoopsStatus_t checkCausalConv1dInput(tecoopsHandle_t handle,
                                                int batch, int totalSeqLen,
                                                int dim, int width,
+                                               int convStateStride,
+                                               int xSeqStride, int outSeqStride,
                                                const void *x, const void *weight,
                                                void *out) {
     if (handle == nullptr) {
@@ -50,7 +74,7 @@ static tecoopsStatus_t checkCausalConv1dInput(tecoopsHandle_t handle,
     if (batch <= 0 || totalSeqLen <= 0 || dim <= 0 || width <= 0) {
         return TECOOPS_STATUS_BAD_PARAM;
     }
-    return TECOOPS_STATUS_SUCCESS;
+    return checkCausalConv1dAlignment(dim, convStateStride, xSeqStride, outSeqStride);
 }
 
 tecoopsStatus_t tecoopsCausalConv1d(tecoopsHandle_t handle,
@@ -72,7 +96,8 @@ tecoopsStatus_t tecoopsCausalConv1d(tecoopsHandle_t handle,
                                     const int *convStateIndices,
                                     const int8_t *hasInitialState) {
     tecoopsStatus_t input_error = checkCausalConv1dInput(
-        handle, batch, totalSeqLen, dim, width, x, weight, out);
+        handle, batch, totalSeqLen, dim, width, convStateStride, xSeqStride,
+        outSeqStride, x, weight, out);
     if (input_error != TECOOPS_STATUS_SUCCESS)
         return input_error;
 

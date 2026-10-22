@@ -187,7 +187,7 @@ void causal_conv1d_fn_torch(
     auto x_t = x.t().contiguous();
     auto out_t = out.t().contiguous();
 
-    tecoopsCausalConv1d(
+    tecoopsStatus_t status = tecoopsCausalConv1d(
         handle,
         batch, totalSeqLen, dim, width,
         convStateStride, xSeqStride, outSeqStride,
@@ -200,6 +200,14 @@ void causal_conv1d_fn_torch(
         query_start_loc.data_ptr<int>(),
         cache_indices.data_ptr<int>(),
         has_initial_state.data_ptr<int8_t>());
+
+    // Fail closed: the C entry rejects non-16-aligned shapes with
+    // TECOOPS_STATUS_BAD_PARAM (see teco/interface/ops/causal_conv1d.cpp) instead
+    // of aborting the process inside the kernel.  Without this check the failure
+    // would be silent -- the status is dropped and 'out' keeps whatever it had.
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "causal_conv1d failed: status=", static_cast<int>(status), " (",
+                tecoopsGetErrorString(status), ")");
 
     // Copy result from [totalSeqLen, dim] back to original out [dim, totalSeqLen]
     out.copy_(out_t.t());

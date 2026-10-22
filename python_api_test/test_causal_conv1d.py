@@ -157,7 +157,7 @@ def test_causal_conv1d():
         passed = max_err_out < 2e-2 and max_err_conv < 2e-2
         all_passed = all_passed and passed
         pad_str = f"dim={dim:4d} seq={total_seqlen:4d} w={width} batch={len(seq_lens)}"
-        print(f"  {pad_str}  out_err={max_err_out:.6e}  conv_err={max_err_conv:.6e}  {'PASSED' if passed else 'FAILED'}")
+        print(f"  {pad_str}  out_err={max_err_out:.6e}  conv_err={max_err_conv:.6e}  atol=2.000e-02  (reference: CPU fp32 conv1d+SiLU via torch.nn.functional, fp16 inputs)  {'PASSED' if passed else 'FAILED'}")
 
     return all_passed
 
@@ -181,13 +181,57 @@ def test_causal_conv1d_pad():
         passed = max_err_out < 2e-2 and max_err_conv < 2e-2
         all_passed = all_passed and passed
         print(f"  dim={dim:4d} seq={total_seqlen:4d} w={width} batch={len(seq_lens)} pad_skip"
-              f"  out_err={max_err_out:.6e}  conv_err={max_err_conv:.6e}  {'PASSED' if passed else 'FAILED'}")
+              f"  out_err={max_err_out:.6e}  conv_err={max_err_conv:.6e}  atol=2.000e-02  (reference: CPU fp32 conv1d+SiLU via torch.nn.functional, fp16 inputs)  {'PASSED' if passed else 'FAILED'}")
 
     return all_passed
+
+
+def test_causal_conv1d_misaligned():
+    """非 16 对齐 shape 必须在参数层 fail-closed，而不是在 kernel 内 abort
+
+    16-lane 向量主循环以 32 B 对齐的 simd_load/simd_store 访问
+    {t*x_seq_stride, t*out_seq_stride, k*dim, w*dim} + 16*blk，因此要求 dim 与
+    x_seq_stride / out_seq_stride / conv_state_stride 全部是 16 half（32 B）的倍数。
+    在加这道守卫之前，dim=2047 会在 warmup 阶段 abort 整个进程
+    （SDAA_ERROR_MISALIGNED_ADDRESS，rc=134）；现在应由 C 入口返回
+    TECOOPS_STATUS_BAD_PARAM，绑定层转成 RuntimeError，且**不写任何输出**。
+    所以这里同时断言输出与 conv_state 的哨兵值未被改动：失败必须是"拒绝"，
+    不能是"跑了但写坏"。
+    """
+    print("=" * 60)
+    print("Test: causal_conv1d non-16-aligned rejection (fail-closed)")
+    dim, total_seqlen, width, num_entries = 2047, 16, 4, 2
+    sentinel = 7.0
+
+    qsl = torch.tensor([0, 6, 16], dtype=torch.int32, device="sdaa")
+    cache_indices = torch.tensor([0, 1], dtype=torch.int32, device="sdaa")
+    has_init = torch.tensor([0, 0], dtype=torch.int8, device="sdaa")
+
+    x = torch.randn(dim, total_seqlen, dtype=torch.half, device="sdaa")
+    weight = torch.randn(width, dim, dtype=torch.half, device="sdaa")
+    conv_states = torch.randn(num_entries, width - 1, dim, dtype=torch.half, device="sdaa")
+    conv_before = conv_states.clone()
+    out = torch.full((dim, total_seqlen), sentinel, dtype=torch.half, device="sdaa")
+
+    raised = False
+    try:
+        tecoops.causal_conv1d_fn_torch(
+            out, conv_states, x, weight, qsl, cache_indices, has_init, -1)
+    except RuntimeError as err:
+        raised = True
+        print(f"  dim={dim} (dim % 16 != 0) -> RuntimeError: {err}")
+
+    out_kept = bool(torch.all(out == sentinel).item())
+    state_kept = bool(torch.equal(conv_states, conv_before))
+    passed = raised and out_kept and state_kept
+    print(f"  raised={raised}  out_sentinel_kept={out_kept}  conv_state_kept={state_kept}"
+          f"  {'PASSED' if passed else 'FAILED'}")
+    return passed
 
 
 if __name__ == "__main__":
     r1 = test_causal_conv1d()
     r2 = test_causal_conv1d_pad()
+    r3 = test_causal_conv1d_misaligned()
     print()
-    print("ALL PASSED" if (r1 and r2) else "SOME FAILED")
+    print("ALL PASSED" if (r1 and r2 and r3) else "SOME FAILED")
