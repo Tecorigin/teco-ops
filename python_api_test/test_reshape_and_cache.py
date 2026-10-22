@@ -111,16 +111,37 @@ CONFIGS = [
 ]
 
 
-def check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim):
-    print(f"  Config: {name} (hidden={hidden}, kv_heads={kv_heads}, head_dim={head_dim})")
+def check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim,
+                                   fused_qkv=False):
+    layout = "fused-QKV view" if fused_qkv else "contiguous"
+    print(f"  Config: {name} ({layout}, hidden={hidden}, "
+          f"kv_heads={kv_heads}, head_dim={head_dim})")
 
     num_tokens = 512
     block_size = 16
     num_blocks = 64  # ceil(512/16) * 1.5
 
-    # 同一组输入 (fp16)
-    key = torch.randn(num_tokens, kv_heads, head_dim, dtype=torch.float16)
-    value = torch.randn(num_tokens, kv_heads, head_dim, dtype=torch.float16)
+    # Slice after the transfer: moving a CPU view to SDAA can materialize it
+    # before the binding is called and would miss the stride regression.
+    torch.manual_seed(0)
+    if fused_qkv:
+        q_width = q_heads * head_dim
+        kv_width = kv_heads * head_dim
+        fused = torch.randn(num_tokens, q_width + 2 * kv_width,
+                            dtype=torch.float16).to('sdaa')
+        _, key_flat, value_flat = fused.split([q_width, kv_width, kv_width], dim=-1)
+        key_sdaa = key_flat.view(num_tokens, kv_heads, head_dim)
+        value_sdaa = value_flat.view(num_tokens, kv_heads, head_dim)
+        expected_stride = ((q_heads + 2 * kv_heads) * head_dim, head_dim, 1)
+        assert not key_sdaa.is_contiguous()
+        assert not value_sdaa.is_contiguous()
+        assert key_sdaa.stride() == expected_stride
+        assert value_sdaa.stride() == expected_stride
+        key, value = key_sdaa.cpu(), value_sdaa.cpu()
+    else:
+        key = torch.randn(num_tokens, kv_heads, head_dim, dtype=torch.float16)
+        value = torch.randn(num_tokens, kv_heads, head_dim, dtype=torch.float16)
+        key_sdaa, value_sdaa = key.to('sdaa'), value.to('sdaa')
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64)
     assert slot_mapping.max() < num_blocks * block_size
 
@@ -132,11 +153,11 @@ def check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim):
     # ---- SDAA kernel ----
     kc_sdaa = torch.zeros(num_blocks, kv_heads, block_size, head_dim, device='sdaa', dtype=torch.float16)
     vc_sdaa = torch.zeros(num_blocks, kv_heads, block_size, head_dim, device='sdaa', dtype=torch.float16)
-    tecoops.reshape_and_cache(key.to('sdaa'), value.to('sdaa'), slot_mapping.to('sdaa'), kc_sdaa, vc_sdaa)
+    tecoops.reshape_and_cache(key_sdaa, value_sdaa, slot_mapping.to('sdaa'), kc_sdaa, vc_sdaa)
 
     # ---- 比对 ----
-    key_ok = torch.allclose(sdaa_to_cpu(kc_sdaa.cpu()), kc_cpu, atol=0.01)
-    val_ok = torch.allclose(sdaa_to_cpu(vc_sdaa.cpu()), vc_cpu, atol=0.01)
+    key_ok = torch.equal(sdaa_to_cpu(kc_sdaa.cpu()), kc_cpu)
+    val_ok = torch.equal(sdaa_to_cpu(vc_sdaa.cpu()), vc_cpu)
     print(f"    key_cache:  {'OK' if key_ok else 'MISMATCH'}")
     print(f"    value_cache: {'OK' if val_ok else 'MISMATCH'}")
     return key_ok and val_ok
@@ -149,8 +170,10 @@ def test_reshape_and_cache():
 
     all_ok = True
     for name, hidden, q_heads, kv_heads, head_dim in CONFIGS:
-        ok = check_reshape_and_cache_config(name, hidden, q_heads, kv_heads, head_dim)
-        all_ok = all_ok and ok
+        for fused_qkv in (False, True):
+            ok = check_reshape_and_cache_config(
+                name, hidden, q_heads, kv_heads, head_dim, fused_qkv=fused_qkv)
+            all_ok = all_ok and ok
 
     assert all_ok, "FAILED"
     print("  All configs PASSED\n")

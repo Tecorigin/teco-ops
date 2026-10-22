@@ -33,7 +33,22 @@ namespace ops {
 using tecoops::ual::args::ReshapeAndCacheArgs;
 
 int findReshapeAndCacheBranch(const ReshapeAndCacheArgs *arg) {
-    return 0;
+    // Branch 1 is the SPM-staged DMA path.  The DMA descriptor engine needs
+    // 64-byte aligned global addresses and 64-byte multiple sections, so the
+    // branch is only taken when every derived stride satisfies that; otherwise
+    // branch 0 (the reference blocking copy) keeps the operator correct for any
+    // geometry.  Dispatch-time decision, never a hot-path branch.
+    constexpr int kDmaAlign = 64;
+    const int head_bytes = arg->size_per_head * static_cast<int>(sizeof(short));
+    const int row_bytes  = arg->num_kv_heads * head_bytes;
+    const int strides[5] = {arg->block_stride, arg->head_stride, arg->entry_stride,
+                            arg->key_stride, arg->value_stride};
+    if (head_bytes <= 0 || row_bytes <= 0) return 0;
+    if (head_bytes % kDmaAlign != 0 || row_bytes % kDmaAlign != 0) return 0;
+    for (int i = 0; i < 5; ++i) {
+        if (strides[i] <= 0 || strides[i] % kDmaAlign != 0) return 0;
+    }
+    return 1;
 }
 
 }  // namespace ops

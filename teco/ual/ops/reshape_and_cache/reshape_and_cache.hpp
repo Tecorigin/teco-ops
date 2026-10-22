@@ -31,6 +31,7 @@
 #include "ual/com/log.h"
 #include "ual/ops/reshape_and_cache/find_reshape_and_cache.h"
 #include "ual/kernel/reshape_and_cache/reshape_and_cache.h"
+#include "ual/kernel/z_reshape_and_cache_dma/reshape_and_cache_dma.h"
 
 namespace tecoops {
 namespace ual {
@@ -48,10 +49,12 @@ struct ReshapeAndCacheType {
 
 static ReshapeAndCacheType::PImplType ReshapeAndCacheAlgos[] = {
     teco_slave_reshape_and_cache_fp16,
+    teco_slave_reshape_and_cache_fp16_dma,
 };
 
 static const char *ReshapeAndCacheDiscription[] = {
     "teco_slave_reshape_and_cache_fp16",
+    "teco_slave_reshape_and_cache_fp16_dma",
 };
 
 struct ReshapeAndCacheOp : public BaseOp<ReshapeAndCacheOp, ReshapeAndCacheType> {
