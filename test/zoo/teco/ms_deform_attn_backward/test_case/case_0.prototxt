@@ -1,0 +1,98 @@
+op_name: "ms_deform_attn_backward"
+
+input {
+  id: "value"
+  shape { dims: 1 dims: 6 dims: 1 dims: 4 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data { seed: 1 lower_bound: -1 upper_bound: 1 distribution: UNIFORM }
+}
+input {
+  id: "spatial_shapes"
+  shape { dims: 1 dims: 2 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT64
+  ttype: TENSOR
+  prev_value { value_l: 2 value_l: 3 }
+}
+input {
+  id: "sampling_locations"
+  shape { dims: 1 dims: 2 dims: 1 dims: 1 dims: 2 dims: 2 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  prev_value { value_f: 0.25 value_f: 0.375 value_f: 0.25 value_f: 0.375 value_f: 0.25 value_f: 0.375 value_f: 0.25 value_f: 0.375 }
+}
+input {
+  id: "attention_weights"
+  shape { dims: 1 dims: 2 dims: 1 dims: 1 dims: 2 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data { seed: 3 lower_bound: 0.2 upper_bound: 0.8 distribution: UNIFORM }
+}
+input {
+  id: "grad_output"
+  shape { dims: 1 dims: 2 dims: 4 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data { seed: 4 lower_bound: -1 upper_bound: 1 distribution: UNIFORM }
+}
+output {
+  id: "grad_value"
+  shape { dims: 1 dims: 6 dims: 1 dims: 4 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+
+}
+output {
+  id: "grad_locations"
+  shape { dims: 1 dims: 2 dims: 1 dims: 1 dims: 2 dims: 2 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+
+}
+output {
+  id: "grad_weights"
+  shape { dims: 1 dims: 2 dims: 1 dims: 1 dims: 2 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+
+}
+
+tecokernel_param { ms_deform_attn_backward_param {} }
+test_param { error_func: DIFF1 error_threshold: 5e-5 }
+
+# BSD 3-Clause License
+#
+# Copyright (c) 2024, Tecorigin Co., Ltd.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

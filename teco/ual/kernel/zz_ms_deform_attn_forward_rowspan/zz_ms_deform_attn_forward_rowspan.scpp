@@ -1,0 +1,191 @@
+// BSD 3-Clause License
+//
+// Copyright (c) 2024, Tecorigin Co., Ltd.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice, this
+//    list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from
+//    this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Compacted row-span specialization of ms_deform_attn_forward (fp32).
+//
+// The delivered kernel issues one blocking value transfer per valid bilinear
+// corner, four per (level, point), each carrying head_dim elements of ONE head
+// out of a pixel stride of num_heads*head_dim.  The delivered c14 span-merge
+// collapses the four into one transfer but needs 2*value_len*num_heads*head_dim
+// <= 128 elements, which is false for every real training geometry, so on the
+// real shape the kernel is literally unchanged.
+//
+// Why this shape needs a different decomposition: inside a level plane value is
+// [pixel, head, dim] with pixel stride num_heads*head_dim, and the two x-corners
+// of one bilinear row are ADJACENT pixels (x1 == x0 + 1).  Their two corner
+// blocks therefore sit in one contiguous two-pixel span, but the transfer cannot
+// start at the second corner and stop after head_dim elements -- a blocked copy
+// has to carry the intermediate head blocks of the span.
+//
+// The compaction: shift the transfer origin to
+//     start_pixel*num_heads*head_dim + head*head_dim
+// so a two-pixel span needs only
+//     (2-1)*num_heads*head_dim + head_dim
+// elements instead of 2*num_heads*head_dim.  On the real geometry (m=8, d=32)
+// that is 288 instead of 512 elements, i.e. 4.5x the delivered bytes instead of
+// the 8x a pixel-aligned row-span costs, for half the emissions and the same
+// number of work items.  Both rows are merged, so the per-(level, point)
+// transfer count drops from 4 to 2.
+//
+// Semantics are preserved exactly and by construction: the additions still run
+// y0-left, y0-right, y1-left, y1-right with the delivered expressions, factors
+// and fp32 rounding, and the compaction only relabels where the record starts,
+// so every element finally read is the same global element the delivered kernel
+// reads.  The capacity decision is NOT taken here -- the host binds it once per
+// call in findMsDeformAttnForwardBranch, so this kernel has no selector branch
+// and no getenv.  This TU is named zz_* so it sorts after every delivered device
+// TU (z_ms_deform_attn_forward_span included) and cannot move them inside the
+// single LTO link unit.
+
+#include "ual/kernel/zz_ms_deform_attn_forward_rowspan/zz_ms_deform_attn_forward_rowspan.h"
+
+#include <cmath>
+#include <cstdint>
+#include <sdaa_memcpy.h>
+
+#include "teco_kernel_context.h"
+
+namespace {
+
+__device__ inline float read_as_float(const float *data, size_t index) {
+    return data[index];
+}
+
+template <typename T>
+__device__ void ms_deform_attn_forward_rowspan_kernel(MsDeformAttnForwardArgs args) {
+    const int n = args.batch;
+    const int s = args.value_len;
+    const int m = args.num_heads;
+    const int d = args.head_dim;
+    const int lq = args.num_queries;
+    const int levels = args.num_levels;
+    const int points = args.num_points;
+    const int64_t *shapes = args.spatial_shapes;
+    const T *value = static_cast<const T *>(args.value);
+    const T *locations = static_cast<const T *>(args.sampling_locations);
+    const T *weights = static_cast<const T *>(args.attention_weights);
+    T *output = static_cast<T *>(args.output);
+
+    // One work item owns one (batch, query, head) vector, exactly as delivered --
+    // the specialization changes the transfer decomposition only.
+    const size_t total = static_cast<size_t>(n) * lq * m;
+    const size_t per_spe = (total + args.spe_num - 1) / args.spe_num;
+    const size_t begin = static_cast<size_t>(threadIdx) * per_spe;
+    const size_t end = (begin + per_spe < total) ? begin + per_spe : total;
+
+    // Two-pixel row span with a head-shifted origin: (2-1)*m*d + d elements.
+    T value_record[512] __attribute__((aligned(64)));
+    for (size_t flat = begin; flat < end; ++flat) {
+        size_t t = flat;
+        const int head = static_cast<int>(t % m);
+        t /= m;
+        const int query = static_cast<int>(t % lq);
+        const int batch = static_cast<int>(t / lq);
+        float acc[128];
+        for (int dim = 0; dim < d; ++dim) acc[dim] = 0.0f;
+
+        int level_start = 0;
+        for (int level = 0; level < levels; ++level) {
+            const int h = static_cast<int>(shapes[level * 2]);
+            const int w = static_cast<int>(shapes[level * 2 + 1]);
+            const size_t loc_base =
+                (((((static_cast<size_t>(batch) * lq + query) * m + head) * levels + level)
+                    * points) * 2);
+            const size_t weight_base =
+                ((((static_cast<size_t>(batch) * lq + query) * m + head) * levels + level)
+                    * points);
+
+            for (int point = 0; point < points; ++point) {
+                const float sx = read_as_float(locations, loc_base + point * 2);
+                const float sy = read_as_float(locations, loc_base + point * 2 + 1);
+                const float x = sx * static_cast<float>(w) - 0.5f;
+                const float y = sy * static_cast<float>(h) - 0.5f;
+                const float x0f = floorf(x);
+                const float y0f = floorf(y);
+                const int x0 = static_cast<int>(x0f);
+                const int y0 = static_cast<int>(y0f);
+                const int x1 = x0 + 1;
+                const int y1 = y0 + 1;
+                const float wx1 = x - x0f;
+                const float wy1 = y - y0f;
+                const float wx0 = 1.0f - wx1;
+                const float wy0 = 1.0f - wy1;
+                const float aw = read_as_float(weights, weight_base + point);
+
+                const size_t value_base =
+                    (static_cast<size_t>(batch) * s + level_start) * m * d;
+                const int xs[2] = {x0, x1};
+                const int ys[2] = {y0, y1};
+                const float wx[2] = {wx0, wx1};
+                const float wy[2] = {wy0, wy1};
+                const bool vx[2] = {(x0 >= 0 && x0 < w), (x1 >= 0 && x1 < w)};
+                const bool vy[2] = {(y0 >= 0 && y0 < h), (y1 >= 0 && y1 < h)};
+
+                for (int iy = 0; iy < 2; ++iy) {
+                    if (!vy[iy]) continue;
+                    const int first = vx[0] ? 0 : 1;
+                    if (!vx[first]) continue;
+                    const int last = vx[1] ? 1 : 0;
+                    const int x_first = xs[first];
+                    const int span = xs[last] - x_first + 1;
+                    const int start_pixel = ys[iy] * w + x_first;
+                    // The transfer may never leave the level plane; when it is
+                    // capped by the plane end the cap is still >= span, because
+                    // both corners of a valid span live inside the plane.
+                    const int avail = h * w - start_pixel;
+                    int use = (2 < avail) ? 2 : avail;
+                    if (use < span) use = span;
+                    ::memcpy(value_record,
+                             value + value_base + static_cast<size_t>(start_pixel) * m * d +
+                                 static_cast<size_t>(head) * d,
+                             (static_cast<size_t>(use - 1) * m * d + d) * sizeof(T));
+                    for (int ix = 0; ix < 2; ++ix) {
+                        if (!vx[ix]) continue;
+                        const size_t off = static_cast<size_t>(xs[ix] - x_first) * m * d;
+                        const float factor = wx[ix] * wy[iy] * aw;
+                        for (int dim = 0; dim < d; ++dim) {
+                            acc[dim] += read_as_float(value_record, off + dim) * factor;
+                        }
+                    }
+                }
+            }
+            level_start += h * w;
+        }
+        const size_t output_base = flat * d;
+        for (int dim = 0; dim < d; ++dim) {
+            output[output_base + dim] = static_cast<T>(acc[dim]);
+        }
+    }
+}
+
+}  // namespace
+
+__global__ void teco_slave_ms_deform_attn_forward_rowspan_fp32(MsDeformAttnForwardArgs args) {
+    ms_deform_attn_forward_rowspan_kernel<float>(args);
+}

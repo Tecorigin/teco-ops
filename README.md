@@ -2,6 +2,10 @@
 
 Teco-Ops 算子开发项目，提供基于 SDAA C 编程模型的高性能算子实现、C++ 接口封装、Python API 绑定（PyTorch 扩展）、Plugin 自定义算子接口（Teco-Inference 推理框架）及完整的测试框架。通过本项目，您可以高效地开发和优化自定义算子，将其封装为 C++/Python 接口并无缝集成到 PyTorch 或Teco-Inference中，同时利用内置测试框架全面验证算子的正确性与性能。
 
+## Deformable-DETR MSDeformAttn 前向与一阶反向
+
+本仓库提供 `tecoops.ms_deform_attn_forward` 与 `tecoops.ms_deform_attn_backward`，用于 Deformable-DETR 的多尺度双线性采样前向与一阶反向，接口支持 FP32/FP16。训练可使用 `tecoops.ms_deform_attn` 可微封装，计算 value、sampling locations 与 attention weights 的梯度；该封装不支持二阶梯度。输入布局、限制和对拍命令见 [前向设计说明](doc/op_docs/ms_deform_attn_forward.md)、[反向设计说明](doc/op_docs/ms_deform_attn_backward.md)、`python_api_test/test_ms_deform_attn_forward.py` 与 `python_api_test/test_ms_deform_attn_backward.py`。
+
 ## 代码架构
 
 本项目分为算子代码（采用 interface + ual 分层架构设计）和 Python API 接口两部分：
@@ -207,6 +211,7 @@ pip install dist/tecoops-*.whl
 ```bash
 # 测试 flatten_rays 算子
 python python_api_test/test_flatten_rays.py
+python python_api_test/test_ms_deform_attn_forward.py
 ```
 
 **注意：** 使用 torch 扩展时，需先 `import torch` 再 `import tecoops`。
