@@ -115,20 +115,27 @@ void flash_attn_varlen_func_torch(
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
-    // parse q_seq_lens
-    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
-    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
-    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
-    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
-    for (int b = 0; b < batch_size; b++) {
-        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
-    }
-    auto q_lens = q_lens_cpu.to("sdaa");
+    TORCH_CHECK(cu_seqlens_q.defined(),
+                "flash_attn_varlen_func: cu_seqlens_q must be defined");
+    TORCH_CHECK(cu_seqlens_q.scalar_type() == torch::kInt32,
+                "flash_attn_varlen_func: cu_seqlens_q must have dtype int32, got ",
+                cu_seqlens_q.scalar_type());
+    TORCH_CHECK(cu_seqlens_q.is_contiguous(),
+                "flash_attn_varlen_func: cu_seqlens_q must be contiguous");
+    TORCH_CHECK(cu_seqlens_q.device() == q.device(),
+                "flash_attn_varlen_func: cu_seqlens_q must reside on the same "
+                "device as q (", q.device(), "), got ", cu_seqlens_q.device());
 
+    // 原本每次调用 1 次 D2H 同步；现改为设备侧相邻差分，与 #36 的绑定层做法一致；plugin 侧的同类同步依赖 #39 的 tecoopsFlashAttentionCuSeqlensQ 入口，后续跟进。
+    auto q_lens = (cu_seqlens_q.slice(0, 1, batch_size + 1) - cu_seqlens_q.slice(0, 0, batch_size)).to(torch::kInt32).contiguous();
+
+    // The kernel writes every [total_q, num_heads, head_size] output element.
+    // Allocate without a device-wide clear so each call does not pay for a
+    // redundant full-output memset. The focused API test seeds a caller-
+    // provided output tensor with a sentinel and compares the complete result,
+    // so an incomplete kernel write remains observable.
     if (!out.defined()) {
-        out = torch::zeros_like(q);
-    } else {
-        out.zero_();
+        out = torch::empty_like(q);
     }
 
     tecoopsHandle_t handle = getGlobalHandle();
@@ -147,7 +154,7 @@ void flash_attn_varlen_func_torch(
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
 
-    tecoopsFlashAttention(handle,
+    const tecoopsStatus_t status = tecoopsFlashAttention(handle,
                           max_seqlen_q, max_seqlen_k, max_block_num,
                           (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
                           blockTableDesc, block_table.data_ptr(),
@@ -162,6 +169,17 @@ void flash_attn_varlen_func_torch(
     tecoopsDestroyTensorDescriptor(kCacheDesc);
     tecoopsDestroyTensorDescriptor(vCacheDesc);
     tecoopsDestroyTensorDescriptor(oDataDesc);
+
+    // Do not swallow the C ABI status: with the redundant output clear removed,
+    // a failed dispatch would hand the caller an uninitialised output tensor
+    // that "looks fine". The descriptors are released above, so the Python
+    // exception leaks nothing. On failure the output contents are undefined
+    // (see doc/op_docs/flash_attention.md).
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "flash_attention rejected the call (status=", static_cast<int>(status),
+                ": ", tecoopsGetErrorString(status),
+                "); the output tensor was not written and its contents are "
+                "not guaranteed.");
 }
 
 void causal_conv1d_fn_torch(

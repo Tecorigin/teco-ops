@@ -109,6 +109,13 @@ tecoopsFlashAttention参数信息
 | oData          | 输出      | 设备端        | 输出矩阵，`[total_q, num_heads, head_size]` half                 |
 | workspace      | 输入      | 设备端        | 工作空间（当前未使用）                                             |
 
+### 输出初始化契约
+
+`tecoopsFlashAttention` 会覆盖全部 `[total_q, num_heads, head_size]` 输出元素。PyTorch
+绑定在 `out` 未提供时使用 `empty_like`，在 `out` 已提供时直接写入，不再为每次调用执行整块
+设备清零。调用方必须传入与 `q` 同形状、可写的输出张量；API focused test 用 `7.0` 哨兵预填
+输出并与参考结果逐元素比较，以便暴露任何未写入区域。
+
 ### 类型限制
 
 | 参数          | 数据类型 | 维度信息                                             | 存储格式 |
@@ -230,3 +237,32 @@ tecoops.flash_attn_varlen_func(
     seqused_k=seqused_k, causal=True, block_table=block_table, out=out,
 )
 ```
+
+## 输出初始化契约的适用范围
+
+「`out` 未提供时用 `empty_like`、已提供时直接写入、kernel 全量覆盖输出」这一契约对
+**所有 shape** 成立，包括 chunked prefill、GQA（`num_q_heads != num_kv_heads`）与
+tail block（最后一个 `cur_BM < BM` 的 query block）：kernel 没有跳过写的早退路径，
+输出按 `[total_q, num_heads, head_size]` 整块写入，因此不能依赖旧的 `zeros_like` /
+`zero_()` 清零来掩盖未写区域。
+
+该前提由 `python_api_test/test_flash_attention.py` 的哨兵用例保障：输出先用
+`torch.full_like(q_dev, 7.0)` 预填，再与参考逐元素比较；任何未写入区域都会以 7.0
+的形式暴露为巨大误差，而不是被清零掩盖。若后续新增 shape 支持，必须保持该哨兵用例通过。
+
+## 失败路径的输出契约
+
+去掉 `zero_()` 后，绑定层的输出契约如下：
+
+- **成功路径**：C API 返回 `TECOOPS_STATUS_SUCCESS` 时，kernel 全量覆盖
+  `[total_q, num_heads, head_size]` 输出，与清零后写入等价。
+- **失败路径**：绑定层现在检查 `tecoopsFlashAttention` 的 C API 返回码
+  （`TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS, ...)`）。任何非 `SUCCESS`
+  状态（`BAD_PARAM` / `NOT_SUPPORTED` / `INTERNAL_ERROR` 等）都会以
+  `RuntimeError` 抛给调用方，错误信息包含数值状态码与
+  `tecoopsGetErrorString` 的描述。**调用方不应读取失败调用的输出张量**：
+  由于不再清零，失败时输出内容未定义（可能是未初始化内存），仅在成功返回时
+  保证有效。Python 异常抛出前，绑定层已释放全部 tensor descriptor，无资源泄漏。
+- 负例覆盖见 `python_api_test/test_flash_attention.py` 的
+  `test_negative_invalid_call_raises`：以 k/v cache shape 不一致触发
+  `TECOOPS_STATUS_BAD_PARAM`，断言抛出 `RuntimeError` 而非返回垃圾输出。

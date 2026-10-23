@@ -199,7 +199,8 @@ def _run_one_fa_test(
     cu_seqlens_q = cu_seqlens_q.to("sdaa")
     seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
     bt_dev = block_table.to("sdaa")
-    out_dev = torch.empty_like(q_dev)
+    # Seed the output so a missing write cannot be hidden by an empty tensor.
+    out_dev = torch.full_like(q_dev, 7.0)
 
     tecoops.flash_attn_varlen_func(
         q_dev, k_dev, v_dev,
@@ -366,6 +367,149 @@ def test_multi_batch():
 
     return all_ok
 
+
+def test_negative_invalid_call_raises():
+    """负例: 非法调用必须抛异常, 而不是返回未初始化内存
+
+    绑定契约 (doc/op_docs/flash_attention.md): out 不再清零, 依赖 kernel 全量
+    覆盖输出。绑定层现在检查 C API 返回码: 底层返回非 SUCCESS (例如这里用
+    k/v cache shape 不一致触发 TECOOPS_STATUS_BAD_PARAM) 时必须抛出
+    RuntimeError, 调用方不能拿到"看起来正常"的垃圾输出。
+    """
+    print("-" * 60)
+    print("negative 测试 (非法调用必须抛 RuntimeError)")
+
+    q_seq_lens, kv_seq_lens = [32], [64]
+    q, kc, vc, bt = _make_random_fa_inputs(q_seq_lens, kv_seq_lens, 8, 4, 128, 32)
+    head_size = q.shape[-1]
+
+    q_dev = q.contiguous().to("sdaa")
+    k_dev = kc.contiguous().to("sdaa")
+    # k/v cache shape 不一致 -> C 接口 flashAttentionCheckArgs 返回 BAD_PARAM
+    v_bad = torch.randn(
+        kc.shape[0], kc.shape[1], kc.shape[2], head_size + 16,
+        dtype=torch.float16,
+    ).to("sdaa")
+    bt_dev = bt.to("sdaa")
+    seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
+    # 哨兵预填: 若绑定吞掉错误码, 输出不会是干净的参考值
+    out_dev = torch.full_like(q_dev, 7.0)
+
+    try:
+        tecoops.flash_attn_varlen_func(
+            q_dev, k_dev, v_bad,
+            max(q_seq_lens),
+            torch.tensor([0, 32], dtype=torch.int32).to("sdaa"),
+            max(kv_seq_lens),
+            torch.Tensor(),       # cu_seqlens_k (unused)
+            seqused_k,
+            1.0 / math.sqrt(float(head_size)),
+            True,
+            torch.Tensor(),       # window_size (unused)
+            bt_dev,
+            False,                # return_softmax_lse
+            out_dev,
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        # 错误信息必须点明被拒绝的调用与返回码, 而不是任意崩溃
+        if "flash_attention rejected" in msg and "status" in msg:
+            # 被拒绝的调用不得写入输出: 哨兵必须原样保留(参数校验失败在内核
+            # launch 之前, 因此这里是"kernel 未写输出"路径的正面证据)。
+            if not torch.equal(out_dev.cpu(), torch.full_like(q_dev, 7.0).cpu()):
+                print(f"  [{'negative_invalid_call':30s}] FAILED "
+                      f"(rejected call still wrote the output tensor)")
+                return False
+            print(f"  [{'negative_invalid_call':30s}] PASSED "
+                  f"(RuntimeError: {msg.splitlines()[0][:80]}... ; sentinel untouched)")
+            return True
+        print(f"  [{'negative_invalid_call':30s}] FAILED "
+              f"(RuntimeError raised but rejection not reported): {msg}")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"  [{'negative_invalid_call':30s}] FAILED "
+              f"(unexpected {type(e).__name__}): {e}")
+        return False
+
+    print(f"  [{'negative_invalid_call':30s}] FAILED "
+          f"(no exception raised; caller would receive uninitialised output)")
+    return False
+
+
+def test_negative_dispatch_rejected_raises():
+    """负例(派发拒绝): 派发层返回非 SUCCESS 时输出必须保持未写入
+
+    与 test_negative_invalid_call_raises 触发的 BAD_PARAM(=3, 参数校验失败) 不同,
+    这里 k/v cache 形状自洽(能过 flashAttentionCheckArgs), 只是 block_size=64
+    落在 ALGO0 fail-closed 契约之外(ALGO0 要求 block_size==32, 见 #47):
+    C 接口应返回 NOT_SUPPORTED(=6)。本 PR 的关键风险正是"派发失败时输出未写入",
+    因此一旦底层拒绝, 绑定层必须抛 RuntimeError 且调用方预填的哨兵输出原样保留。
+
+    分支依赖(如实): 当前 PR #38 的分支还没有 #47 的 fail-closed 守卫
+    (findFlashAttentionBranch 恒返回 0), 此时该调用会被接受, 派发拒绝路径在本
+    分支不可达 —— 用例打印 SKIPPED 并说明原因, 待 #47 合入后自动变为强断言
+    (PASSED 分支)。因此该用例不会把本分支 CI 变红, 也不会在缺少守卫时虚报覆盖。
+    """
+    print("-" * 60)
+    print("negative 测试 (派发拒绝: 有 fail-closed 守卫时必须抛异常且输出未写)")
+    q_seq_lens, kv_seq_lens = [32], [64]
+    # block_size=64: shape 自洽, 仅在 ALGO0 的 block_size==32 fail-closed 契约下才被拒
+    q, kc, vc, bt = _make_random_fa_inputs(q_seq_lens, kv_seq_lens, 8, 4, 64, 64)
+    head_size = q.shape[-1]
+
+    q_dev = q.contiguous().to("sdaa")
+    k_dev = kc.contiguous().to("sdaa")
+    v_dev = vc.contiguous().to("sdaa")
+    bt_dev = bt.to("sdaa")
+    seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
+    # 哨兵预填: 派发拒绝时 kernel 不得写入, 输出必须与调用前逐位相同
+    sentinel = torch.full_like(q_dev, 7.0)
+    out_dev = sentinel.clone()
+
+    try:
+        tecoops.flash_attn_varlen_func(
+            q_dev, k_dev, v_dev,
+            max(q_seq_lens),
+            torch.tensor([0, 32], dtype=torch.int32).to("sdaa"),
+            max(kv_seq_lens),
+            torch.Tensor(),       # cu_seqlens_k (unused)
+            seqused_k,
+            1.0 / math.sqrt(float(head_size)),
+            True,
+            torch.Tensor(),       # window_size (unused)
+            bt_dev,
+            False,                # return_softmax_lse
+            out_dev,
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        if "flash_attention rejected" not in msg or "status" not in msg:
+            print(f"  [{'negative_dispatch_reject':30s}] FAILED "
+                  f"(RuntimeError raised but rejection not reported): {msg}")
+            return False
+        if not torch.equal(out_dev.cpu(), sentinel.cpu()):
+            print(f"  [{'negative_dispatch_reject':30s}] FAILED "
+                  f"(rejected call still wrote the output tensor)")
+            return False
+        print(f"  [{'negative_dispatch_reject':30s}] PASSED "
+              f"(RuntimeError: {msg.splitlines()[0][:70]}... ; sentinel output untouched)")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  [{'negative_dispatch_reject':30s}] FAILED "
+              f"(unexpected {type(e).__name__}): {e}")
+        return False
+
+    # 没有抛异常: 本分支缺少 #47 的 fail-closed 守卫, 派发拒绝路径不可达。
+    # 如实标记 SKIPPED(不算失败, 也不冒充已覆盖); #47 合入后这里会走 PASSED 分支。
+    untouched = torch.equal(out_dev.cpu(), sentinel.cpu())
+    print(f"  [{'negative_dispatch_reject':30s}] SKIPPED "
+          f"(dispatch fail-closed guard from #47 is absent on this branch: "
+          f"ALGO0 findFlashAttentionBranch always returns 0, so block_size=64 is "
+          f"accepted; sentinel_written={not untouched}; becomes an active "
+          f"assertion once #47 merges)")
+    return True
+
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -388,6 +532,8 @@ if __name__ == "__main__":
         ("test_chunked_prefill",  test_chunked_prefill),
         ("test_gqa",  test_gqa),
         ("test_multi_batch",  test_multi_batch),
+        ("test_negative_invalid_call_raises",  test_negative_invalid_call_raises),
+        ("test_negative_dispatch_rejected_raises",  test_negative_dispatch_rejected_raises),
     ]
 
     all_passed = True

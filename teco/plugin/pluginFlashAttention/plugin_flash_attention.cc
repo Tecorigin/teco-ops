@@ -79,7 +79,41 @@ class PluginFlashAttentionImpl : public AbstractPluginOp {
     std::vector<int> q_shape, k_cache_shape, v_cache_shape, bt_shape;
     ctx->GetInputShape("q", q_shape);           // [total_tokens, num_heads, head_size]
     ctx->GetInputShape("k_cache", k_cache_shape); // [num_blocks, kv_heads, block_size, head_size]
-    (void)v_cache_shape;
+    // v_cache shares k_cache's layout but must be described from its own
+    // tensor, and the block table needs its real rank: a default (0-dim)
+    // descriptor makes the device-side block lookup read out of bounds, which
+    // surfaces as non-finite outputs in the decode path.
+    ctx->GetInputShape("v_cache", v_cache_shape);
+    ctx->GetInputShape("block_table", bt_shape);  // [batch_size, blocks_per_seq]
+
+    // The graph feeds cu_seqlens_q (cumulative, [batch + 1]) while the kernel
+    // consumes per-batch q lengths ([batch]). The Python binding derives them
+    // on device; the plugin has no torch context, so derive them here with a
+    // batch-bounded int round trip. Without this the kernel reads the first
+    // cumulative offset as a length, which for batch == 1 yields a zero-length
+    // sequence and an output buffer the kernel never writes -- exactly the
+    // "non-finite values in output" this PR's CI hit.
+    const int batch_size = bt_shape.empty() ? 0 : bt_shape[0];
+    if (batch_size <= 0) {
+      throw std::runtime_error(
+          "plugin_flash_attention: block_table must be "
+          "[batch_size, block_table_dim]");
+    }
+    std::vector<int> seq_offsets(batch_size + 1, 0);
+    sdaaMemcpy(seq_offsets.data(), cu_seqlens_q_dev,
+               sizeof(int) * (batch_size + 1), sdaaMemcpyDeviceToHost);
+    std::vector<int> q_lens(batch_size, 0);
+    for (int b = 0; b < batch_size; ++b) {
+      q_lens[b] = seq_offsets[b + 1] - seq_offsets[b];
+    }
+    void *q_lens_dev = nullptr;
+    sdaaMalloc(&q_lens_dev, sizeof(int) * batch_size);
+    if (q_lens_dev == nullptr) {
+      throw std::runtime_error(
+          "plugin_flash_attention: failed to allocate q_lens");
+    }
+    sdaaMemcpy(q_lens_dev, q_lens.data(), sizeof(int) * batch_size,
+               sdaaMemcpyHostToDevice);
 
     sdaaStream_t stream = ctx->GetStream();
 
@@ -98,21 +132,21 @@ class PluginFlashAttentionImpl : public AbstractPluginOp {
     make_desc(blockTableDesc, TECOOPS_DATA_INT32, bt_shape);
     make_desc(qDataDesc, TECOOPS_DATA_HALF, q_shape);
     make_desc(kCacheDesc, TECOOPS_DATA_HALF, k_cache_shape);
-    make_desc(vCacheDesc, TECOOPS_DATA_HALF, k_cache_shape);
+    make_desc(vCacheDesc, TECOOPS_DATA_HALF, v_cache_shape);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, q_shape);
 
-    tecoopsFlashAttention(handle,
-                          static_cast<int>(max_seqlen_q),
-                          static_cast<int>(max_seqlen_k),
-                          static_cast<int>(max_block_num),
-                          static_cast<const int*>(cu_seqlens_q_dev),
-                          static_cast<const int*>(seqused_k_dev),
-                          blockTableDesc, static_cast<const void*>(block_table_dev),
-                          qDataDesc, static_cast<const void*>(q_dev),
-                          kCacheDesc, static_cast<const void*>(k_cache_dev),
-                          vCacheDesc, static_cast<const void*>(v_cache_dev),
-                          oDataDesc, out_dev,
-                          /*workspace=*/nullptr);
+    const tecoopsStatus_t status = tecoopsFlashAttention(handle,
+        static_cast<int>(max_seqlen_q),
+        static_cast<int>(max_seqlen_k),
+        static_cast<int>(max_block_num),
+        static_cast<const int*>(q_lens_dev),
+        static_cast<const int*>(seqused_k_dev),
+        blockTableDesc, static_cast<const void*>(block_table_dev),
+        qDataDesc, static_cast<const void*>(q_dev),
+        kCacheDesc, static_cast<const void*>(k_cache_dev),
+        vCacheDesc, static_cast<const void*>(v_cache_dev),
+        oDataDesc, out_dev,
+        /*workspace=*/nullptr);
 
     tecoopsDestroyTensorDescriptor(blockTableDesc);
     tecoopsDestroyTensorDescriptor(qDataDesc);
@@ -121,6 +155,19 @@ class PluginFlashAttentionImpl : public AbstractPluginOp {
     tecoopsDestroyTensorDescriptor(oDataDesc);
 
     tecoopsDestroy(handle);
+    sdaaFree(q_lens_dev);
+
+    // Do not swallow the C ABI status: the output buffer is owned by the
+    // framework and is never cleared here, so a rejected dispatch would hand
+    // the caller an uninitialised buffer that only a finiteness check can
+    // catch. The descriptors and the handle are released above, so throwing
+    // leaks nothing.
+    if (status != TECOOPS_STATUS_SUCCESS) {
+      throw std::runtime_error(
+          std::string("plugin_flash_attention: dispatch failed (status=") +
+          std::to_string(static_cast<int>(status)) + "): " +
+          tecoopsGetErrorString(status));
+    }
   }
 };
 
