@@ -112,18 +112,7 @@ void flash_attn_varlen_func_torch(
     bool return_softmax_lse,
     torch::Tensor out) {
 
-    int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
-
-    // parse q_seq_lens
-    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
-    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
-    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
-    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
-    for (int b = 0; b < batch_size; b++) {
-        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
-    }
-    auto q_lens = q_lens_cpu.to("sdaa");
 
     if (!out.defined()) {
         out = torch::zeros_like(q);
@@ -147,9 +136,14 @@ void flash_attn_varlen_func_torch(
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
 
-    tecoopsFlashAttention(handle,
+    // Shared helper with the inference plugin
+    // (teco/plugin/pluginFlashAttention/plugin_flash_attention.cc): both layers
+    // pass the device-resident cu_seqlens_q to tecoopsFlashAttentionCuSeqlensQ,
+    // and the UAL kernel derives the per-batch q lengths on the device. Do not
+    // reintroduce a host-side .cpu() round-trip here.
+    tecoopsFlashAttentionCuSeqlensQ(handle,
                           max_seqlen_q, max_seqlen_k, max_block_num,
-                          (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
+                          (const int*)cu_seqlens_q.data_ptr(), (const int *)seqused_k.data_ptr(),
                           blockTableDesc, block_table.data_ptr(),
                           qDataDesc, q.data_ptr(),
                           kCacheDesc, k.data_ptr(),

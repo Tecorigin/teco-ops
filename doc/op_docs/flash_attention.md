@@ -87,7 +87,12 @@ tecoops.flash_attn_varlen_func(
 
 ### 参数信息
 
-tecoopsFlashAttention参数信息
+`tecoopsFlashAttention` 接收每 batch 的 query 长度；累计入口
+`tecoopsFlashAttentionCuSeqlensQ`（插件与 Python 绑定共用）使用相同参数顺序，将 `q_seq_lens`
+替换为累计偏移 `cu_seqlens_q`。两种入口的长度元数据都必须是设备端
+`int32` 指针，不能传入主机地址；其他张量描述符和参数保持一致。
+累计入口直接在设备端计算 `cu_seqlens_q[b + 1] - cu_seqlens_q[b]`，
+不会把累计偏移当作每 batch 的长度，也不进行主机往返拷贝。
 
 | 参数           | 输入/输出 | 主机端/设备端 | 说明                                                               |
 | -------------- | --------- | ------------- | ------------------------------------------------------------------ |
@@ -95,8 +100,9 @@ tecoopsFlashAttention参数信息
 | max_seqlen_q   | 输入      | 主机端        | 最大 query 序列长度                                                |
 | max_seqlen_k   | 输入      | 主机端        | 最大 KV 序列长度                                                   |
 | max_block_num  | 输入      | 主机端        | KV cache 中最大 block 数量                                         |
-| q_seq_lens     | 输入      | 主机端        | 每 batch 的 query 长度，`[batch_size]`                           |
-| kv_seq_lens    | 输入      | 主机端        | 每 batch 的 KV 长度，`[batch_size]`                              |
+| q_seq_lens     | 输入      | 设备端        | 每 batch 的 query 长度，`[batch_size]`                           |
+| cu_seqlens_q   | 输入      | 设备端        | 仅累计入口：`[batch_size + 1]` int32，`[0, ..., total_q]`；替代 `q_seq_lens` |
+| kv_seq_lens    | 输入      | 设备端        | 每 batch 的 KV 长度，`[batch_size]`                              |
 | blockTableDesc | 输入      | 主机端        | block table 描述符                                                 |
 | blockTable     | 输入      | 设备端        | block id 映射表，`[batch_size, block_table_dim]` int32           |
 | qDataDesc      | 输入      | 主机端        | Q 数据描述符                                                       |
@@ -122,6 +128,7 @@ tecoopsFlashAttention参数信息
 | vCache        | float16  | `[max_block, num_kv_heads, block_size, head_size]` | Array    |
 | blockTable    | int32    | `[batch_size, block_table_dim]`                    | Array    |
 | q_seq_lens    | int32    | `[batch_size]`                                     | Array    |
+| cu_seqlens_q  | int32    | `[batch_size + 1]`（仅累计入口）                    | Array    |
 | kv_seq_lens   | int32    | `[batch_size]`                                     | Array    |
 | oData         | float16  | `[total_q, num_heads, head_size]`                  | Array    |
 | workspace     | void*    | 标量                                                 | -        |
@@ -230,3 +237,13 @@ tecoops.flash_attn_varlen_func(
     seqused_k=seqused_k, causal=True, block_table=block_table, out=out,
 )
 ```
+
+## 插件长度契约（`q_seq_lens` / `kv_seq_lens`）
+
+- C ABI 的 `q_seq_lens` / `kv_seq_lens` 是**设备端** `int32` 指针，语义为**每个 batch 的实际长度**
+  （`[batch]`），不是前缀和。把主机地址直接传给 C API 不受支持：它们会被当作设备地址读取，
+  调用方必须自行把长度张量放到设备端。
+- 插件入口（`teco/plugin/pluginFlashAttention/`）接受的是**累计长度** `cu_seqlens_q: [batch+1]`，
+  并在设备端完成差分/转换后再进入 C API；这是插件自身的 ABI，不改变 C API 的上述契约。
+- 该累计入口由插件与 Python 绑定（`api/torch_ext.cpp::flash_attn_varlen_func_torch`）**共用**：
+  两层都把设备端 `cu_seqlens_q` 直接交给它，由 kernel 在设备端派生长度，不存在第二份主机端转换实现。

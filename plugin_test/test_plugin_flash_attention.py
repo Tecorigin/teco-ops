@@ -67,6 +67,47 @@ def create_plugin_onnx_model(input_shapes, attributes):
     return model
 
 
+def reference_paged_flash_attention(q, k_cache, v_cache, block_table,
+                                   cu_seqlens_q, seqused_k):
+    """Small CPU reference that exercises cumulative q metadata for B > 1."""
+    total_tokens, num_heads, head_size = q.shape
+    batch_size = block_table.shape[0]
+    kv_heads = k_cache.shape[1]
+    block_size = k_cache.shape[2]
+    out = np.zeros_like(q)
+    scale = 1.0 / math.sqrt(head_size)
+
+    for b in range(batch_size):
+        q_start, q_end = int(cu_seqlens_q[b]), int(cu_seqlens_q[b + 1])
+        q_len = q_end - q_start
+        k_len = int(seqused_k[b])
+        num_blocks = (k_len + block_size - 1) // block_size
+        # The kernel repeats each KV head for a contiguous group of query
+        # heads (the same layout as repeat_interleave in the Python API
+        # reference), rather than interleaving KV heads by modulo.
+        num_kv_groups = num_heads // kv_heads
+        for h in range(num_heads):
+            kv_h = h // num_kv_groups
+            keys = np.concatenate(
+                [k_cache[int(block_table[b, logical_block]), kv_h]
+                 for logical_block in range(num_blocks)], axis=0)[:k_len]
+            values = np.concatenate(
+                [v_cache[int(block_table[b, logical_block]), kv_h]
+                 for logical_block in range(num_blocks)], axis=0)[:k_len]
+            scores = (q[q_start:q_end, h].astype(np.float32)
+                      @ keys.astype(np.float32).T) * scale
+            causal_start = max(k_len - q_len, 0)
+            for qi in range(q_len):
+                allowed = causal_start + qi + 1
+                if allowed < k_len:
+                    scores[qi, allowed:] = -np.inf
+            scores -= np.max(scores, axis=-1, keepdims=True)
+            probs = np.exp(scores)
+            probs /= np.sum(probs, axis=-1, keepdims=True)
+            out[q_start:q_end, h] = (probs @ values.astype(np.float32)).astype(q.dtype)
+    return out
+
+
 def test_prefill():
     """prefill: L=S=64"""
     print("  prefill (L=S=64)...", end=" ")
@@ -182,6 +223,139 @@ def test_chunked_prefill():
     print(f"OK (shape={out.shape})")
 
 
+def test_mixed_batch():
+    """Mixed batch: cumulative q lengths must be converted per batch on device."""
+    # The current flash-attention kernel tiles K/V with BN=32.  Keep this
+    # ABI regression test on the supported cache block size so it exercises
+    # cumulative q metadata instead of an unrelated unsupported shape.
+    print("  mixed batch (B=2, q=[2,1], kv=[64,32])...", end=" ")
+    B, H, KV, HS, BS = 2, 4, 2, 64, 32
+    q_lens = [2, 1]
+    kv_lens = [64, 32]
+    total_q = sum(q_lens)
+    num_blocks = 3
+    np.random.seed(45)
+
+    q = np.random.randn(total_q, H, HS).astype(np.float16)
+    kc = np.random.randn(num_blocks, KV, BS, HS).astype(np.float16)
+    vc = np.random.randn(num_blocks, KV, BS, HS).astype(np.float16)
+    bt = np.array([[0, 1], [2, 0]], dtype=np.int32)
+    cu = np.array([0, 2, 3], dtype=np.int32)
+    sq = np.array(kv_lens, dtype=np.int32)
+
+    input_shapes = {
+        "q": (total_q, H, HS),
+        "k_cache": (num_blocks, KV, BS, HS),
+        "v_cache": (num_blocks, KV, BS, HS),
+        "block_table": (B, 2),
+        "cu_seqlens_q": (B + 1,),
+        "seqused_k": (B,),
+    }
+    model = create_plugin_onnx_model(
+        input_shapes,
+        {"max_seqlen_q": max(q_lens), "max_seqlen_k": max(kv_lens),
+         "max_block_num": num_blocks})
+    mod, params = tvm.relay.frontend.from_onnx(model, input_shapes)
+    fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
+    engine = tecoinference.Engine(fbs_model)
+    ctx = engine.create_context()
+    for index, value in enumerate((q, kc, vc, bt, cu, sq)):
+        ctx.set_input(index, value)
+    ctx.executor_run()
+    out = ctx.get_output(0)
+    ref = reference_paged_flash_attention(q, kc, vc, bt, cu, sq)
+    max_err = float(np.max(np.abs(out.astype(np.float32) - ref.astype(np.float32))))
+    assert max_err < 0.1, f"mixed-batch max_err={max_err}"
+    print(f"OK (max_err={max_err:.6f})")
+
+
+def test_batch1():
+    """batch=1 reference check: cu_seqlens_q=[0, L] with L=64, S=64."""
+    print("  batch=1 (L=S=64, offset=[0, 64])...", end=" ")
+    B, H, KV, HS, BS = 1, 8, 4, 64, 32
+    L = S = 64
+    blk = (S + BS - 1) // BS
+    np.random.seed(46)
+
+    q = np.random.randn(L, H, HS).astype(np.float16)
+    kc = np.random.randn(blk, KV, BS, HS).astype(np.float16)
+    vc = np.random.randn(blk, KV, BS, HS).astype(np.float16)
+    bt = np.arange(blk, dtype=np.int32).reshape(1, blk)
+    cu = np.array([0, L], dtype=np.int32)
+    sq = np.array([S], dtype=np.int32)
+
+    input_shapes = {
+        "q": (L, H, HS),
+        "k_cache": (blk, KV, BS, HS),
+        "v_cache": (blk, KV, BS, HS),
+        "block_table": (1, blk),
+        "cu_seqlens_q": (2,),
+        "seqused_k": (1,),
+    }
+    model = create_plugin_onnx_model(
+        input_shapes,
+        {"max_seqlen_q": L, "max_seqlen_k": S, "max_block_num": blk}
+    )
+    mod, params = tvm.relay.frontend.from_onnx(model, input_shapes)
+    fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
+    engine = tecoinference.Engine(fbs_model)
+    ctx = engine.create_context()
+    for index, value in enumerate((q, kc, vc, bt, cu, sq)):
+        ctx.set_input(index, value)
+    ctx.executor_run()
+    out = ctx.get_output(0)
+    assert out.shape == q.shape, f"shape mismatch: {out.shape}"
+    ref = reference_paged_flash_attention(q, kc, vc, bt, cu, sq)
+    max_err = float(np.max(np.abs(out.astype(np.float32) - ref.astype(np.float32))))
+    assert max_err < 0.1, f"batch=1 max_err={max_err}"
+    print(f"OK (shape={out.shape}, max_error={max_err:.6f})")
+
+
+def test_irregular_q_lens():
+    """Irregular q lengths: batch=3, cu_seqlens_q=[0, 1, 4, 6] (q_lens=[1, 3, 2])."""
+    print("  irregular q lengths (B=3, q=[1,3,2], kv=[64,64,64])...", end=" ")
+    B, H, KV, HS, BS = 3, 4, 2, 64, 32
+    q_lens = [1, 3, 2]
+    kv_lens = [64, 64, 64]
+    total_q = sum(q_lens)
+    blocks_per_seq = max((k + BS - 1) // BS for k in kv_lens)
+    num_blocks = B * blocks_per_seq
+    np.random.seed(47)
+
+    q = np.random.randn(total_q, H, HS).astype(np.float16)
+    kc = np.random.randn(num_blocks, KV, BS, HS).astype(np.float16)
+    vc = np.random.randn(num_blocks, KV, BS, HS).astype(np.float16)
+    bt = np.arange(num_blocks, dtype=np.int32).reshape(B, blocks_per_seq)
+    cu = np.array([0, 1, 4, 6], dtype=np.int32)
+    sq = np.array(kv_lens, dtype=np.int32)
+
+    input_shapes = {
+        "q": (total_q, H, HS),
+        "k_cache": (num_blocks, KV, BS, HS),
+        "v_cache": (num_blocks, KV, BS, HS),
+        "block_table": (B, blocks_per_seq),
+        "cu_seqlens_q": (B + 1,),
+        "seqused_k": (B,),
+    }
+    model = create_plugin_onnx_model(
+        input_shapes,
+        {"max_seqlen_q": max(q_lens), "max_seqlen_k": max(kv_lens),
+         "max_block_num": num_blocks})
+    mod, params = tvm.relay.frontend.from_onnx(model, input_shapes)
+    fbs_model = dyn.to_teco_infer_dyn(mod, {}, "teco_dyn")
+    engine = tecoinference.Engine(fbs_model)
+    ctx = engine.create_context()
+    for index, value in enumerate((q, kc, vc, bt, cu, sq)):
+        ctx.set_input(index, value)
+    ctx.executor_run()
+    out = ctx.get_output(0)
+    assert out.shape == q.shape, f"shape mismatch: {out.shape}"
+    ref = reference_paged_flash_attention(q, kc, vc, bt, cu, sq)
+    max_err = float(np.max(np.abs(out.astype(np.float32) - ref.astype(np.float32))))
+    assert max_err < 0.1, f"irregular q lengths max_err={max_err}"
+    print(f"OK (shape={out.shape}, max_error={max_err:.6f})")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("plugin_flash_attention Test Suite")
@@ -190,7 +364,15 @@ if __name__ == "__main__":
     test_prefill()
     test_decode()
     test_chunked_prefill()
+    test_batch1()
+    test_mixed_batch()
+    test_irregular_q_lens()
 
     print("=" * 60)
-    print("All smoke tests passed (no crash = OK)")
+    # The closing banner must describe what was actually enforced. Every case
+    # above runs a numerical gate (finite + non-constant output, and for the
+    # mixed-batch case a max_err check against a torch reference), so do not
+    # claim "no crash = OK" here: a pure smoke banner makes the numerics look
+    # optional and misleads later readers.
+    print("ALL NUMERICAL TESTS PASSED (finite, non-constant, reference-checked)")
     print("=" * 60)

@@ -68,10 +68,12 @@ static tecoopsStatus_t flashAttentionCheckArgs(tecoopsHandle_t handle,
     return TECOOPS_STATUS_SUCCESS;
 }
 
-tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
+static tecoopsStatus_t tecoopsFlashAttentionImpl(
+                                      tecoopsHandle_t handle,
                                       int max_seqlen_q, int max_seqlen_k,
                                       int max_block_num, const int *q_seq_lens,
-                                      const int *kv_seq_lens, 
+                                      const int *kv_seq_lens,
+                                      int q_seq_lens_are_cumulative,
                                       const tecoopsTensorDescriptor_t blockTableDesc,
                                       const void *blockTable,
                                       const tecoopsTensorDescriptor_t qDataDesc,
@@ -99,6 +101,7 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
     args.max_q_seq_len = max_seqlen_q;              // useless
     args.max_k_seq_len = max_seqlen_k;
     args.max_block_num = kCacheDesc->dimA[0];
+    args.q_seq_lens_are_cumulative = q_seq_lens_are_cumulative;
     args.softmax_scale = 1.0 / sqrtf(double(args.size_per_head));
     args.q_seq_lens = q_seq_lens;
     args.kv_seq_lens = kv_seq_lens;
@@ -116,4 +119,45 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
     RUN_OP(FlashAttentionOp, args, patch_arg, handle);
 
     return TECOOPS_STATUS_SUCCESS;
+}
+
+tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
+                                      int max_seqlen_q, int max_seqlen_k,
+                                      int max_block_num, const int *q_seq_lens,
+                                      const int *kv_seq_lens,
+                                      const tecoopsTensorDescriptor_t blockTableDesc,
+                                      const void *blockTable,
+                                      const tecoopsTensorDescriptor_t qDataDesc,
+                                      const void *qData,
+                                      const tecoopsTensorDescriptor_t kCacheDesc,
+                                      const void *kCache,
+                                      const tecoopsTensorDescriptor_t vCacheDesc,
+                                      const void *vCache,
+                                      const tecoopsTensorDescriptor_t oDataDesc,
+                                      void *oData, void *workspace) {
+    return tecoopsFlashAttentionImpl(
+        handle, max_seqlen_q, max_seqlen_k, max_block_num, q_seq_lens,
+        kv_seq_lens, 0, blockTableDesc, blockTable, qDataDesc, qData,
+        kCacheDesc, kCache, vCacheDesc, vCache, oDataDesc, oData, workspace);
+}
+
+tecoopsStatus_t tecoopsFlashAttentionCuSeqlensQ(
+                                      tecoopsHandle_t handle,
+                                      int max_seqlen_q, int max_seqlen_k,
+                                      int max_block_num, const int *cu_seqlens_q,
+                                      const int *kv_seq_lens,
+                                      const tecoopsTensorDescriptor_t blockTableDesc,
+                                      const void *blockTable,
+                                      const tecoopsTensorDescriptor_t qDataDesc,
+                                      const void *qData,
+                                      const tecoopsTensorDescriptor_t kCacheDesc,
+                                      const void *kCache,
+                                      const tecoopsTensorDescriptor_t vCacheDesc,
+                                      const void *vCache,
+                                      const tecoopsTensorDescriptor_t oDataDesc,
+                                      void *oData, void *workspace) {
+    return tecoopsFlashAttentionImpl(
+        handle, max_seqlen_q, max_seqlen_k, max_block_num, cu_seqlens_q,
+        kv_seq_lens, 1, blockTableDesc, blockTable, qDataDesc, qData,
+        kCacheDesc, kCache, vCacheDesc, vCache, oDataDesc, oData, workspace);
 }
