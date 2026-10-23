@@ -1,0 +1,94 @@
+op_name: "rms_norm_compat"
+
+input {
+  id: "input"
+  shape {
+    dims: 8
+    dims: 512
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 73
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "weight"
+  shape {
+    dims: 512
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 74
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "rstd"
+  shape {
+    dims: 8
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data: {
+    seed: 75
+    upper_bound: 2.0
+    lower_bound: 0.25
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "residual"
+  shape {
+    dims: 8
+    dims: 512
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 76
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+output {
+  id: "output"
+  shape {
+    dims: 8
+    dims: 512
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+output {
+  id: "residual_out"
+  shape {
+    dims: 8
+    dims: 512
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+test_param {
+  error_func: DIFF1
+  error_threshold: 1e-2
+}

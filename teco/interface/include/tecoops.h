@@ -153,6 +153,23 @@ tecoopsStatus_t tecoopsRmsNorm(
     int hidden_size,
     float eps);
 
+// Reference-exact RMSNorm epilogue (Gemma-4 compatibility specialization).
+// `rstd` is the per-row statistic produced by the reference chain
+// (vllm.ir.ops.rms_norm / RMSNorm.forward_static); this entry point never
+// recomputes it, so the fp16 output stays bit-identical to the reference on the
+// shapes Gemma-4 issues.  Separate entry point and separate kernels: the
+// delivered tecoopsRmsNorm arithmetic is unchanged.
+tecoopsStatus_t tecoopsRmsNormCompat(
+    tecoopsHandle_t handle,
+    const void *input,
+    const void *weight,
+    const void *rstd,
+    const void *residual,
+    void *output,
+    void *residual_out,
+    int num_tokens,
+    int hidden_size);
+
 tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
                                       int max_seqlen_q, int max_seqlen_k,
                                       int max_block_num, const int *q_seq_lens,

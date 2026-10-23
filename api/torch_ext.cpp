@@ -96,6 +96,26 @@ void rms_norm_torch(
                    num_tokens, hidden_size, static_cast<float>(eps));
 }
 
+void rms_norm_compat_torch(
+    torch::Tensor input, torch::Tensor weight, torch::Tensor rstd,
+    c10::optional<torch::Tensor> residual,
+    torch::Tensor output, c10::optional<torch::Tensor> residual_out) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the operator on the caller's current SDAA stream so the epilogue stays
+    // ordered after the reference statistics kernels that produced `rstd`.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+    int num_tokens = input.size(0);
+    int hidden_size = input.size(1);
+
+    const void *residual_ptr = residual.has_value() ? residual.value().data_ptr() : nullptr;
+    void *res_out_ptr = residual_out.has_value() ? residual_out.value().data_ptr() : nullptr;
+
+    tecoopsRmsNormCompat(handle,
+                         input.data_ptr(), weight.data_ptr(), rstd.data_ptr(),
+                         residual_ptr, output.data_ptr(), res_out_ptr,
+                         num_tokens, hidden_size);
+}
+
 void flash_attn_varlen_func_torch(
     torch::Tensor q,
     torch::Tensor k,
@@ -210,6 +230,7 @@ PYBIND11_MODULE(_torch_ext, m) {
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
     m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
+    m.def("rms_norm_compat", &rms_norm_compat_torch, "rms_norm_compat (SDAA)");
     m.def("flash_attn_varlen_func", &flash_attn_varlen_func_torch, "flash_attn_varlen_func (SDAA)");
     m.def("causal_conv1d_fn_torch", &causal_conv1d_fn_torch, "causal_conv1d_fn_torch (SDAA)");
 }

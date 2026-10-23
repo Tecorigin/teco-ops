@@ -1,0 +1,61 @@
+op_name: "rms_norm_compat"
+
+input {
+  id: "input"
+  shape: {
+    dims: 64
+    dims: 4096
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 42
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "weight"
+  shape: {
+    dims: 4096
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data: {
+    seed: 43
+    upper_bound: 1.0
+    lower_bound: -1.0
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "rstd"
+  shape: {
+    dims: 64
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_FLOAT
+  ttype: TENSOR
+  random_data: {
+    seed: 44
+    upper_bound: 2.0
+    lower_bound: 0.25
+    distribution: UNIFORM
+  }
+}
+
+output {
+  id: "output"
+  shape: {
+    dims: 64
+    dims: 4096
+  }
+  layout: LAYOUT_NCHW
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}

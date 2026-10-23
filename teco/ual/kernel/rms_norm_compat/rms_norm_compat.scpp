@@ -1,0 +1,319 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+// rms_norm_compat: reference-exact RMSNorm epilogue (Gemma-4 compatibility).
+//
+// Structure is deliberately the delivered teco_slave_rms_norm_fp16{,_add} one:
+// same R1C32_CR tile, same SPM budget, same memcpy_async row-pair pipeline.  The
+// ONLY change is the epilogue: the delivered kernel evaluates
+//     fp32( fp32(x * rstd) * weight ) -> fp16
+// while this kernel reproduces the reference chain's intermediate rounding
+//     fp16( fp32(x) * rstd ), then a fp16 multiply by the fp16 weight
+// and, for the fused form, a fp32 residual add whose rounding to fp16 is the
+// reference's `residual_out`.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/rms_norm/rms_norm_compat.h"
+
+#include "teco_hal_tensor.hpp"
+#include "teco_hal_tile.hpp"
+
+using namespace tecoops::ual::args;  // NOLINT
+using namespace teco::hal;            // NOLINT
+using namespace sdaa;                 // NOLINT
+
+// Reference epilogue: fp32(x) * rstd -> round to fp16 -> fp16 multiply by weight.
+__device__ __always_inline void rms_norm_compat_epilogue(const half *src, const half *weight,
+                                                         half *dst, float rstd, int D) {
+    int d = 0;
+    const floatv16 rstd_vec = simd_vcpyfs(rstd);
+    for (; d + 16 <= D; d += 16) {
+        float16v16 input_half, weight_half;
+        simd_loadu(input_half, src + d);
+        simd_loadu(weight_half, weight + d);
+        const floatv16 input_vec = simd_vfcvths(input_half);
+        const floatv16 scaled = input_vec * rstd_vec;
+        const float16v16 scaled_half = simd_vfcvtsh(scaled);
+        const float16v16 weighted = simd_vfmulh(scaled_half, weight_half);
+        simd_storeu(weighted, dst + d);
+    }
+    for (; d < D; ++d) {
+        const half scaled = static_cast<half>(static_cast<float>(src[d]) * rstd);
+        dst[d] = static_cast<half>(static_cast<float>(scaled) * static_cast<float>(weight[d]));
+    }
+}
+
+// ================================================================
+// Kernel 0: reference-exact RMSNorm epilogue (rstd supplied per row)
+// ================================================================
+__global__ void teco_slave_rms_norm_fp16_compat(RmsNormCompatArgs args) {
+    const int N = args.num_tokens;
+    const int D = args.hidden_size;
+
+    half *input_hbm  = static_cast<half *>(const_cast<void *>(args.input));
+    half *weight_hbm = static_cast<half *>(const_cast<void *>(args.weight));
+    const float *rstd_hbm = static_cast<const float *>(args.rstd);
+    half *output_hbm = static_cast<half *>(args.output);
+
+    Tensor<half, 2> input_gm(input_hbm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+
+    auto tile = make_tile<SplitMode::R1C32_CR>(
+        input_gm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+    auto block = tile.compute_core_block_shape();
+    int my_rows = static_cast<int>(block[0]);
+    if (my_rows == 0) return;
+
+    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
+    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 7));
+    half *in0   = spm_base;
+    half *in1   = in0 + D;
+    half *in2   = in1 + D;
+    half *in3   = in2 + D;
+    half *out0  = in3 + D;
+    half *out1  = out0 + D;
+    half *weight = out1 + D;
+    half *inbuf[4] = {in0, in1, in2, in3};
+    half *outbuf[2] = {out0, out1};
+
+    MemcpyHandle get_in[4];
+    MemcpyHandle put_out[2];
+
+    size_t offset = tile.compute_linear_index();
+    // compute_linear_index() is the row-major ELEMENT offset of this core's first row
+    // (current_offset_[0] * stride[0]), so the per-row statistic index is offset / D.
+    const size_t row_base = offset / static_cast<size_t>(D);
+
+    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in[0]);
+    memcpy_wait(get_in[0]);
+
+    if (my_rows > 0) {
+        memcpy_async(inbuf[0], input_hbm + offset, row_bytes,
+                     MemcpyGlobalToSpm, get_in[0]);
+    }
+    if (my_rows > 1) {
+        memcpy_async(inbuf[1], input_hbm + offset + D, row_bytes,
+                     MemcpyGlobalToSpm, get_in[1]);
+    }
+
+    for (int r = 0; r < my_rows; r += 2) {
+        const int p = (r >> 1) & 1;          // pair parity
+        const int a = p << 1;                // current pair buffers: a, a+1
+        const int na = (1 - p) << 1;         // next pair buffers: na, na+1
+        const int r1 = r + 1;
+        const bool has2 = (r1 < my_rows);
+
+        memcpy_wait(get_in[a]);
+        if (has2) {
+            memcpy_wait(get_in[a + 1]);
+        }
+
+        if (r + 2 < my_rows) {
+            memcpy_async(inbuf[na], input_hbm + offset + (r + 2) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na]);
+        }
+        if (r + 3 < my_rows) {
+            memcpy_async(inbuf[na + 1], input_hbm + offset + (r + 3) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na + 1]);
+        }
+
+        // The row statistic comes from the reference chain (bit-exact rstd);
+        // this kernel only applies the reference epilogue rounding order.
+        memcpy_wait(put_out[0]);
+        rms_norm_compat_epilogue(inbuf[a], weight, outbuf[0], rstd_hbm[row_base + r], D);
+        memcpy_async(output_hbm + offset + r * D, outbuf[0], row_bytes,
+                     MemcpySpmToGlobal, put_out[0]);
+
+        if (has2) {
+            memcpy_wait(put_out[1]);
+            rms_norm_compat_epilogue(inbuf[a + 1], weight, outbuf[1],
+                                     rstd_hbm[row_base + r1], D);
+            memcpy_async(output_hbm + offset + r1 * D, outbuf[1], row_bytes,
+                         MemcpySpmToGlobal, put_out[1]);
+        }
+    }
+
+    memcpy_wait(put_out[0]);
+    memcpy_wait(put_out[1]);
+    rt_spm_free(spm_base);
+}
+
+// ================================================================
+// Kernel 1: reference-exact epilogue with the reference's fused residual add
+// ================================================================
+__global__ void teco_slave_rms_norm_fp16_compat_add(RmsNormCompatArgs args) {
+    const int N = args.num_tokens;
+    const int D = args.hidden_size;
+
+    half *input_hbm     = static_cast<half *>(const_cast<void *>(args.input));
+    half *weight_hbm    = static_cast<half *>(const_cast<void *>(args.weight));
+    const float *rstd_hbm = static_cast<const float *>(args.rstd);
+    half *residual_hbm  = static_cast<half *>(const_cast<void *>(args.residual));
+    half *output_hbm    = static_cast<half *>(args.output);
+    half *res_out_hbm   = static_cast<half *>(args.residual_out);
+
+    Tensor<half, 2> input_gm(input_hbm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+
+    auto tile = make_tile<SplitMode::R1C32_CR>(
+        input_gm, {static_cast<size_t>(N), static_cast<size_t>(D)});
+    auto block = tile.compute_core_block_shape();
+    int my_rows = static_cast<int>(block[0]);
+    if (my_rows == 0) return;
+
+    const size_t row_bytes = static_cast<size_t>(D) * sizeof(half);
+    half *spm_base = static_cast<half *>(rt_spm_malloc(row_bytes * 11));
+    half *in0    = spm_base;
+    half *in1    = in0 + D;
+    half *in2    = in1 + D;
+    half *in3    = in2 + D;
+    half *res0   = in3 + D;
+    half *res1   = res0 + D;
+    half *res2   = res1 + D;
+    half *res3   = res2 + D;
+    half *out0   = res3 + D;
+    half *out1   = out0 + D;
+    half *weight = out1 + D;
+    half *inbuf[4]  = {in0, in1, in2, in3};
+    half *resbuf[4] = {res0, res1, res2, res3};
+    half *outbuf[2] = {out0, out1};
+
+    MemcpyHandle get_in[4];
+    MemcpyHandle get_res[4];
+    MemcpyHandle put_out[2];
+    MemcpyHandle put_res[4];
+
+    size_t offset = tile.compute_linear_index();
+    // Same row-major element offset as above: the statistic index is offset / D.
+    const size_t row_base = offset / static_cast<size_t>(D);
+
+    memcpy_async(weight, weight_hbm, row_bytes, MemcpyGlobalToSpm, get_in[0]);
+    memcpy_wait(get_in[0]);
+
+    if (my_rows > 0) {
+        memcpy_async(inbuf[0],  input_hbm + offset,    row_bytes, MemcpyGlobalToSpm, get_in[0]);
+        memcpy_async(resbuf[0], residual_hbm + offset, row_bytes, MemcpyGlobalToSpm, get_res[0]);
+    }
+    if (my_rows > 1) {
+        memcpy_async(inbuf[1],  input_hbm + offset + D,    row_bytes, MemcpyGlobalToSpm, get_in[1]);
+        memcpy_async(resbuf[1], residual_hbm + offset + D, row_bytes, MemcpyGlobalToSpm, get_res[1]);
+    }
+
+    for (int r = 0; r < my_rows; r += 2) {
+        const int p = (r >> 1) & 1;
+        const int a = p << 1;
+        const int na = (1 - p) << 1;
+        const int r1 = r + 1;
+        const bool has2 = (r1 < my_rows);
+
+        memcpy_wait(get_in[a]);
+        memcpy_wait(get_res[a]);
+        if (has2) {
+            memcpy_wait(get_in[a + 1]);
+            memcpy_wait(get_res[a + 1]);
+        }
+
+        if (r + 2 < my_rows) {
+            memcpy_wait(put_res[na]);
+            memcpy_async(inbuf[na], input_hbm + offset + (r + 2) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na]);
+            memcpy_async(resbuf[na], residual_hbm + offset + (r + 2) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_res[na]);
+        }
+        if (r + 3 < my_rows) {
+            memcpy_wait(put_res[na + 1]);
+            memcpy_async(inbuf[na + 1], input_hbm + offset + (r + 3) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_in[na + 1]);
+            memcpy_async(resbuf[na + 1], residual_hbm + offset + (r + 3) * D, row_bytes,
+                         MemcpyGlobalToSpm, get_res[na + 1]);
+        }
+
+        // One pass over the row: fp32 residual add, reference residual_out
+        // rounding, and the reference epilogue order applied to the fp32 sum.
+        const floatv16 rstd_vec0 = simd_vcpyfs(rstd_hbm[row_base + r]);
+        memcpy_wait(put_out[0]);
+        int d = 0;
+        for (; d + 16 <= D; d += 16) {
+            float16v16 hi0, hr0, wv;
+            simd_loadu(hi0, inbuf[a] + d);
+            simd_loadu(hr0, resbuf[a] + d);
+            simd_loadu(wv, weight + d);
+            const floatv16 xr0 = simd_vfcvths(hi0) + simd_vfcvths(hr0);
+            simd_storeu(simd_vfcvtsh(xr0), resbuf[a] + d);          // residual_out
+            const float16v16 scaled0 = simd_vfcvtsh(xr0 * rstd_vec0);
+            simd_storeu(simd_vfmulh(scaled0, wv), outbuf[0] + d);
+        }
+        for (; d < D; ++d) {
+            const float xr0 = static_cast<float>(inbuf[a][d]) + static_cast<float>(resbuf[a][d]);
+            resbuf[a][d] = static_cast<half>(xr0);
+            const half scaled0 = static_cast<half>(xr0 * rstd_hbm[row_base + r]);
+            outbuf[0][d] = static_cast<half>(static_cast<float>(scaled0) *
+                                             static_cast<float>(weight[d]));
+        }
+        memcpy_async(output_hbm + offset + r * D, outbuf[0], row_bytes,
+                     MemcpySpmToGlobal, put_out[0]);
+        memcpy_async(res_out_hbm + offset + r * D, resbuf[a], row_bytes,
+                     MemcpySpmToGlobal, put_res[a]);
+
+        if (has2) {
+            const floatv16 rstd_vec1 = simd_vcpyfs(rstd_hbm[row_base + r1]);
+            memcpy_wait(put_out[1]);
+            d = 0;
+            for (; d + 16 <= D; d += 16) {
+                float16v16 hi1, hr1, wv1;
+                simd_loadu(hi1, inbuf[a + 1] + d);
+                simd_loadu(hr1, resbuf[a + 1] + d);
+                simd_loadu(wv1, weight + d);
+                const floatv16 xr1 = simd_vfcvths(hi1) + simd_vfcvths(hr1);
+                simd_storeu(simd_vfcvtsh(xr1), resbuf[a + 1] + d);
+                const float16v16 scaled1 = simd_vfcvtsh(xr1 * rstd_vec1);
+                simd_storeu(simd_vfmulh(scaled1, wv1), outbuf[1] + d);
+            }
+            for (; d < D; ++d) {
+                const float xr1 = static_cast<float>(inbuf[a + 1][d]) +
+                                  static_cast<float>(resbuf[a + 1][d]);
+                resbuf[a + 1][d] = static_cast<half>(xr1);
+                const half scaled1 = static_cast<half>(xr1 * rstd_hbm[row_base + r1]);
+                outbuf[1][d] = static_cast<half>(static_cast<float>(scaled1) *
+                                                 static_cast<float>(weight[d]));
+            }
+            memcpy_wait(put_out[1]);
+            memcpy_async(output_hbm + offset + r1 * D, outbuf[1], row_bytes,
+                         MemcpySpmToGlobal, put_out[1]);
+            memcpy_async(res_out_hbm + offset + r1 * D, resbuf[a + 1], row_bytes,
+                         MemcpySpmToGlobal, put_res[a + 1]);
+        }
+    }
+
+    memcpy_wait(put_out[0]);
+    memcpy_wait(put_out[1]);
+    memcpy_wait(put_res[0]);
+    memcpy_wait(put_res[1]);
+    memcpy_wait(put_res[2]);
+    memcpy_wait(put_res[3]);
+    rt_spm_free(spm_base);
+}
