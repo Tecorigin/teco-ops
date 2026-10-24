@@ -114,6 +114,32 @@ def rms_norm_add_ref(x, residual, weight, eps=1e-5):
     return out, x_add.astype(np.float16)
 
 
+# --------------------------------------------------------------------------
+# 判定口径（print 出来，避免“刚好卡线”不可解释）
+#
+# 本 plugin 用例的门限沿用 plugin 侧既有约定 ATOL = 1e-2（不在这里收紧，避免把
+# 本 PR 变成红灯），但每行同时打印参考基准与 **1 fp16 ULP 的推导值**：
+# 1 fp16 ULP = 2 ** (floor(log2|ref|) - 10)（次正规区间取 2**-24）。
+# 这与 python 侧 test_rms_norm.py 的 atol 推导一致（那里以 1 ULP 为门限）；
+# plugin 侧实测 max_error 恒为 7.8125e-3 = |out| in [8,16) 的一个 fp16 ULP，
+# 打印出来即可判断“是设计余量”还是“漂移”。
+# --------------------------------------------------------------------------
+ATOL = 1e-2
+REFERENCE_BASIS = "numpy fp32 RMSNorm cast to fp16"
+REFERENCE_BASIS_ADD = "numpy fp32 residual-add + RMSNorm cast to fp16"
+
+
+def fp16_ulp_at(values):
+    """|value| 处的一个 fp16 ULP = 2 ** (floor(log2|value|) - 10)。"""
+    magnitude = np.abs(np.asarray(values, dtype=np.float32))
+    nonzero = magnitude[magnitude > 0.0]
+    if nonzero.size == 0:
+        return float(np.finfo(np.float16).smallest_subnormal)
+    exponent = np.floor(np.log2(float(nonzero.max())))
+    return float(max(2.0 ** (exponent - 10.0),
+                     float(np.finfo(np.float16).smallest_subnormal)))
+
+
 def test_plugin_rms_norm_pure():
     """纯 RMSNorm（多维度）"""
     print("=" * 60)
@@ -150,9 +176,12 @@ def test_plugin_rms_norm_pure():
         out = ctx.get_output(0)
 
         max_err = np.abs(out.astype(np.float32) - expected.astype(np.float32)).max()
-        passed = max_err < 0.01
+        ulp = fp16_ulp_at(expected)
+        passed = max_err < ATOL
         all_passed = all_passed and passed
-        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  max_error = {max_err:.6e}  {'PASSED' if passed else 'FAILED'}")
+        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  max_error = {max_err:.6e}  "
+              f"atol = {ATOL:.3e} (reference: {REFERENCE_BASIS}; "
+              f"1 fp16 ULP @ max|ref| = {ulp:.3e})  {'PASSED' if passed else 'FAILED'}")
 
     return all_passed
 
@@ -196,9 +225,14 @@ def test_plugin_rms_norm_add():
 
         max_err_out = np.abs(out.astype(np.float32) - expected_out.astype(np.float32)).max()
         max_err_res = np.abs(res_out.astype(np.float32) - expected_res.astype(np.float32)).max()
-        passed = max_err_out < 0.01 and max_err_res < 0.01
+        ulp_out = fp16_ulp_at(expected_out)
+        ulp_res = fp16_ulp_at(expected_res)
+        passed = max_err_out < ATOL and max_err_res < ATOL
         all_passed = all_passed and passed
-        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  out_max_err = {max_err_out:.6e}  res_max_err = {max_err_res:.6e}  {'PASSED' if passed else 'FAILED'}")
+        print(f"  hidden={hidden_size:4d}  eps={eps:.0e}  out_max_err = {max_err_out:.6e}  "
+              f"res_max_err = {max_err_res:.6e}  atol = {ATOL:.3e} "
+              f"(reference: {REFERENCE_BASIS_ADD}; 1 fp16 ULP @ max|ref| = "
+              f"out {ulp_out:.3e} / res {ulp_res:.3e})  {'PASSED' if passed else 'FAILED'}")
 
     return all_passed
 

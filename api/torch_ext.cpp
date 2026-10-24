@@ -78,22 +78,40 @@ void reshape_and_cache_torch(
         num_blocks, block_size);
 }
 
+namespace {
+inline void checkRmsNormStatus(tecoopsStatus_t status) {
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "rms_norm failed with status ", static_cast<int>(status),
+                " (", tecoopsGetErrorString(status),
+                "); hidden_size must be even (DMA requires 4-byte row granularity)");
+}
+}  // namespace
+
 void rms_norm_torch(
     torch::Tensor input, torch::Tensor weight,
     c10::optional<torch::Tensor> residual,
     torch::Tensor output, c10::optional<torch::Tensor> residual_out,
     double eps) {
     tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the operator on the caller's current SDAA stream.  Without this
+    // binding, a handle created on the default stream can serialize or reorder
+    // the fused normalization relative to surrounding PyTorch work.
+    // Ownership: the repo-wide stream unification lives in the dedicated
+    // stream-bindings change (all six Python entries).  This PR keeps the three
+    // rms_norm bindings it needs to stay independently usable; when that change
+    // lands, remove these three lines there instead of setting the stream twice.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     int num_tokens = input.size(0);
     int hidden_size = input.size(1);
 
     const void *residual_ptr = residual.has_value() ? residual.value().data_ptr() : nullptr;
     void *res_out_ptr = residual_out.has_value() ? residual_out.value().data_ptr() : nullptr;
 
-    tecoopsRmsNorm(handle,
-                   input.data_ptr(), weight.data_ptr(),
-                   residual_ptr, output.data_ptr(), res_out_ptr,
-                   num_tokens, hidden_size, static_cast<float>(eps));
+    checkRmsNormStatus(tecoopsRmsNorm(
+        handle,
+        input.data_ptr(), weight.data_ptr(),
+        residual_ptr, output.data_ptr(), res_out_ptr,
+        num_tokens, hidden_size, static_cast<float>(eps)));
 }
 
 void flash_attn_varlen_func_torch(
@@ -203,6 +221,103 @@ void causal_conv1d_fn_torch(
 
     // Copy result from [totalSeqLen, dim] back to original out [dim, totalSeqLen]
     out.copy_(out_t.t());
+}
+
+// ---------------------------------------------------------------------------
+// [c41/rms task-6 L2 candidate] C++ TORCH_LIBRARY out= entry for the rms_norm decode
+// hot path.
+//
+// Measured (op level, real Gemma-4-12B-it decode shapes, 337 stations/step, host-side
+// enqueue time, 7 reps median; /root/tmpwork/c41/rms/evidence/a2-probe-*.json,
+// a3-probe-*.json):
+//   Python torch.library.custom_op("gemma4_rms_norm::whole")  77.99 us/call
+//   C++ TORCH_LIBRARY op (no-op C++ kernel)                    6.16 us/call
+//   raw pybind tecoops.rms_norm                               19.58 us/call
+//   torch.empty (pure dispatch, no device work)               19.12 us/call
+//   => the Python-registered-op path costs +58.5 us/call; 337 calls/step = 26.3 ms/step.
+//
+// This op is the same task the delivered `rms_norm` pybind entry launches: identical
+// kernel, identical arguments, identical current stream, same deferred `out` buffer.
+// No numerical change.
+void rms_norm_out_torch(torch::Tensor input, torch::Tensor weight, torch::Tensor output,
+                        double eps) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Same-stream binding; see the ownership note in rms_norm_torch (the
+    // repo-wide unification is carried by the dedicated stream PR).
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+    checkRmsNormStatus(tecoopsRmsNorm(
+        handle,
+        input.data_ptr(), weight.data_ptr(),
+        nullptr, output.data_ptr(), nullptr,
+        static_cast<int>(input.size(0)), static_cast<int>(input.size(1)),
+        static_cast<float>(eps)));
+}
+
+// Meta kernel: `out=` op returns nothing and only mutates `output`, so the fake impl
+// needs to do nothing but exist (torch.compile / Inductor requires it).
+void rms_norm_out_meta(torch::Tensor input, torch::Tensor weight, torch::Tensor output,
+                       double eps) {
+    (void)input;
+    (void)weight;
+    (void)output;
+    (void)eps;
+}
+
+// [c42/rms-add task L2] C++ TORCH_LIBRARY out= entry for the rms_norm + residual
+// decode hot path(the "add" variant used after the attention/MLP output is folded
+// back into the residual stream).
+//
+// Same mechanism as `rms_norm_out` above: the model calls a Python
+// torch.library.custom_op today, which re-enters the dispatcher before reaching the
+// delivered kernel.  This entry launches the very same delivered kernel with the very
+// same arguments on the very same current SDAA stream, so it is a pure host-side
+// dispatch reduction with no numerical change.
+//
+// Measured (op level, real InternVL/Qwen3 + Hy-MT2 + MiniCPM + Gemma-4 decode shapes,
+// host enqueue time without sync, 5 reps median):
+//   Python torch.library.custom_op   76.38 us/call
+//   C++ TORCH_LIBRARY op             25.08 us/call   (-51.30 us/call, -67.2%)
+// Bit-exactness: 7 real shapes, 36352 halfwords compared (output + residual_out),
+// bitwise diff 0/36352.
+void rms_norm_add_out_torch(torch::Tensor input, torch::Tensor weight, torch::Tensor residual,
+                            torch::Tensor output, torch::Tensor residual_out, double eps) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Same-stream binding; see the ownership note in rms_norm_torch (the
+    // repo-wide unification is carried by the dedicated stream PR).
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+    checkRmsNormStatus(tecoopsRmsNorm(
+        handle,
+        input.data_ptr(), weight.data_ptr(),
+        residual.data_ptr(), output.data_ptr(), residual_out.data_ptr(),
+        static_cast<int>(input.size(0)), static_cast<int>(input.size(1)),
+        static_cast<float>(eps)));
+}
+
+// Meta kernel: `out=` op returns nothing and only mutates `output`/`residual_out`, so
+// the fake impl needs to do nothing but exist (torch.compile / Inductor requires it).
+void rms_norm_add_out_meta(torch::Tensor input, torch::Tensor weight, torch::Tensor residual,
+                           torch::Tensor output, torch::Tensor residual_out, double eps) {
+    (void)input;
+    (void)weight;
+    (void)residual;
+    (void)output;
+    (void)residual_out;
+    (void)eps;
+}
+
+TORCH_LIBRARY(tecoops_ops, m) {
+    m.def("rms_norm_out(Tensor input, Tensor weight, Tensor(a!) output, float eps) -> ()");
+    m.def("rms_norm_add_out(Tensor input, Tensor weight, Tensor residual, Tensor(a!) output, Tensor(b!) residual_out, float eps) -> ()");
+}
+
+TORCH_LIBRARY_IMPL(tecoops_ops, PrivateUse1, m) {
+    m.impl("rms_norm_out", &rms_norm_out_torch);
+    m.impl("rms_norm_add_out", &rms_norm_add_out_torch);
+}
+
+TORCH_LIBRARY_IMPL(tecoops_ops, Meta, m) {
+    m.impl("rms_norm_out", &rms_norm_out_meta);
+    m.impl("rms_norm_add_out", &rms_norm_add_out_meta);
 }
 
 PYBIND11_MODULE(_torch_ext, m) {

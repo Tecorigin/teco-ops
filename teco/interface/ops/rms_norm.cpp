@@ -58,6 +58,14 @@ static tecoopsStatus_t checkRmsNormInput(tecoopsHandle_t handle,
     if (num_tokens <= 0 || hidden_size <= 0) {
         return TECOOPS_STATUS_BAD_PARAM;
     }
+    // DMA copies one row of hidden_size * 2 bytes at a time; the SDAA DMA
+    // requires a 4-byte granularity, so an odd hidden size would produce a
+    // 2-byte-granularity row length and fail with ILLEGAL_ADDRESS on device.
+    // Even hidden sizes are supported even when not a multiple of 32: the
+    // 64-byte SPM segment stride in the kernel absorbs the padding.
+    if (hidden_size % 2 != 0) {
+        return TECOOPS_STATUS_BAD_PARAM;
+    }
     return TECOOPS_STATUS_SUCCESS;
 }
 

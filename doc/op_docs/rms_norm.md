@@ -88,6 +88,13 @@ tecoopsStatus_t tecoopsRmsNorm(
 
 ## 性能优化
 
+### PyTorch 当前流绑定
+
+PyTorch 绑定在每次调用前将 Teco-Ops 句柄绑定到调用方当前的 SDAA stream，
+使 RMSNorm 与同一 stream 上的输入生产和后续消费保持顺序，避免句柄默认流
+引入的隐式串行化或跨流重排。该改动不改变 kernel 数学、输入输出布局或 API
+签名；构建后的 C++/Python 正确性和同口径性能门禁仍需在厂商环境执行。
+
 ### 多核并行划分
 
 使用 Hal Tile `R1C32_CR` 模式进行行并行划分，将 `num_tokens` 行均匀分配到各 SPE 核心。每个核心处理 `my_rows` 行，通过 `tile.compute_linear_index()` 计算 HBM 偏移量。
@@ -195,3 +202,80 @@ residual = torch.randn(64, 4096, dtype=torch.half, device='sdaa')
 res_out = torch.empty(64, 4096, dtype=torch.half, device='sdaa')
 tecoops.rms_norm(x, w, residual, out, res_out, eps=1e-6)
 ```
+
+## FP16 SIMD epilogue 与 plain 输出 DMA
+
+plain/add 的第二遍输出循环使用 `floatv16` 主循环和标量尾循环，保留
+FP32 规约与逐元素数学顺序。PyTorch 入口绑定调用方当前 SDAA stream。
+
+plain 输出 DMA 的 source buffer 持有到原有的同 buffer 复用 wait；
+删除紧接 store 的 wait，在释放 SPM 前 drain 两个输出 handle。输入和
+输出 buffer 独立，空闲 handle 初始化为 reply/counter=0/0。add 路径
+保持原来的 wait，因为 residual prefetch 会复用 store source。
+
+### 各模型独立证据
+
+以下固定 commit 链接保留完整 shape、原始三次计时与 median、正确性、
+源码/DSO 哈希和模型收据；每项只证明对应模型和对应源码。
+
+| 模型 / 机制 | 测试范围与结果 | 独立证明 |
+| --- | --- | --- |
+| InternVL / E29 SIMD | hidden4096 与 Q/K128，原 oracle/stream/tail/输入不变；TP2 text/image greedy32，318.024065s 稳态。旧 Q/K 全局 head 行数属于边界压力测试；实际 TP2 每 rank shape 见下一行 | [E29 proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3b8bf1a28fa38374e027dbe2e785cdebd4e06e1e/model_adaptations/InternVL3_5SCUdoudui/validation/rms_epilogue_simd_20261007.json) |
+| InternVL / plain DMA | 48/48 focused 与 A/B/A-after bitwise 一致；per-rank Q/K 行数28976/7244和69632/17408；TP2 greedy32，317.156770s 稳态。长 hidden 同步调用延迟下降1.70%–1.75%，Q/K下降12.20%–13.19% | [DMA proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/3b8bf1a28fa38374e027dbe2e785cdebd4e06e1e/model_adaptations/InternVL3_5SCUdoudui/validation/rms_plain_writeback_20261007.json) |
+| Hy-MT2 / E29 SIMD | 自有 hidden2048/QK128、eps1e-5，36 focused 与原0.002容差；TP1 greedy32和129模块/映射/peak。设备 kernel 延迟下降约32%–65%，host wall计时含噪声/异常值；本模型未验证新的 plain DMA | [Hy proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/2c4378bf0a0f5794b0b3d1fd5a35d2d5e947ce95/model_adaptations/HyMT2SCUdoudui/validation/rms_epilogue_simd_20261007.json) |
+| MiniCPM / E29 SIMD | 自有N1/N7、D1536、eps1e-6，原plain0.005/add和residual0.01；A/B/A-after focused、公开8/8、TP1 greedy32，301.928123s/110稳态请求。同步调用延迟下降24.72%–48.18%；本模型 plain DMA 候选为NO-GO | [Mini proof](https://github.com/Tecorigin/tecovllm-modelzoo/blob/0d0c5d4a1ce4361768f8a7e29fa5de0906a918d8/model_adaptations/MiniCPM5SCUdoudui/validation/rms_epilogue_simd_20261008.json) |
+
+E29 是 `e29b53c256f366e6eee538d656bfbb56e867cefc`，kernel SHA256 为
+`41a517c23ae849f0d36cbdb2746ea2b75e21e5f2efe4dbaf44b6ed99a62193be`。
+InternVL plain DMA 的 kernel SHA256 为
+`93e8e80d08d401fffaa3060bf8e6e24bd989ab59fd8cb09c079228710f66d5b7`。
+Hy/Mini 的 E29 模型结果不验证新的 DMA kernel。
+
+三次同步 host operator-call 与 profiler device 时间按各证明的计时范围
+解释，不相互替代。短 shape 的噪声、负向 median、异常值和模型计时漂移
+保留在原证明中；以上各项均不宣称稳定端到端模型加速。
+
+复现脚本、epilogue-only.patch 与 plain-writeback-only.patch 位于上述
+各模型公开目录。[官方定向 CI](https://github.com/Tecorigin/teco-ops/pull/37#issuecomment-6041962254)
+通过的 head 是 `2949f7061a05af0f4cb2b88fb3344380e3dfc4e0`，早于 plain
+DMA 提交；当前 DMA head 的官方 CI/完整 wheel、官方模型环境和组委会
+完整精度尚未验证。原始收据中的限制仍按其实际源码与构建范围保留。
+
+## Hidden-size contract
+
+- **支持**：`hidden_size % 2 == 0`（含非 32 倍数，如 514/520，靠 kernel 内 64B SPM 段步长吸收 padding）；
+- **拒绝**：`hidden_size % 2 != 0` → `TECOOPS_STATUS_BAD_PARAM` / Python `RuntimeError`（DMA 4B 粒度）；
+- **实测表**：D=513/515 设备报 ILLEGAL_ADDRESS 崩溃（修复前）、D=514/516/520 通过（修复后）。
+
+| Hidden Size ($D$) | 修复前 | 修复后 | 说明 |
+| --- | --- | --- | --- |
+| D=513 / D=515 | 设备报 ILLEGAL_ADDRESS 崩溃 (`rc=134 SDAA_ERROR_ILLEGAL_ADDRESS`) | 拦截并拒绝 (`TECOOPS_STATUS_BAD_PARAM` / Python `RuntimeError`) | 奇数 hidden size 导致 2 字节行长，违背 SDAA DMA 4 字节粒度 |
+| D=514 / D=516 / D=520 | 崩溃 | 通过 (OK, max_err ~1e-3, res_err=0) | 偶数 hidden size 满足 4 字节粒度，64B SPM 段步长吸收尾部 padding |
+
+## 当前对齐修复的构建溯源与回归入口
+
+下面指纹对应 `748ad13c57eca4bdc9c773bd697d446297aa2809` 的独立构建，
+不能与上方 2026-10-07/08 的历史 SIMD/DMA 实验混用；后续只改文档或测例
+不会改变这个源码内核，但重新构建仍应记录新的产物指纹与映射路径。
+
+| 产物 | SHA-256 |
+| --- | --- |
+| `rms_norm_fp16.scpp`（Git LF 内容） | `1e46f892f3e817055059c1f9fec1db571fbf51e0bdd0ccd8f1fa6fde4abca977` |
+| core `libteco_ops.so` | `1d799c32cca4ca175c3baa4e9a8dea80c6c672ba1ce8b5e84e37c4d47ad076bc` |
+| Python `_torch_ext` | `95a01e231296c73910b6ff780cc7b45927180e548c3ca811bc34a8d108122e08` |
+| wheel | `07a000ede2bf41f6ecee7bbccdd1d806e282d757a35c95bc522c44e382983cde` |
+
+构建目录为 `/root/tmpwork/c51/pr37/src`，安装到其 `install/tecoops/`；
+复核时必须同时检查 `/proc/self/maps` 中的实际 core/extension 路径，
+不能仅凭 `tecoops.__file__` 或“API 存在”判断使用了本次库。
+当前源码的 Git blob 为 `0c147b5b0b1339c567eedba67f987ba7bef45923`，
+用于消除 Windows CRLF checkout 与 Linux LF 文件的字节差异歧义。
+
+新增回归 `case_8` 是 `N=7,D=514` 的 plain 路径；`case_9` 是
+`N=7,D=520` 的 residual/add 路径，专门覆盖偶数非 32 倍数的行宽。
+它们追加到 zoo，不替换或改写原 `case_0..7` 固定性能测例。
+奇数 `D=513` 不启动设备 kernel，由 `python_api_test/test_rms_norm.py`
+的负例检查入口拒绝和输出哨兵未写，不能以会崩溃的设备 launch 测拒绝契约。
+
+模型级 greedy32 与 5–10 分钟稳态按各模型自己的源码、shape、安装指纹
+分别留痕；上方历史证明或另一模型的通过结果不能替代当前修复的验证。
