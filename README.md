@@ -46,6 +46,14 @@ Plugin 自定义算子接口基于 Teco-Inference 推理框架，支持通过 TV
 
 详见 [Plugin 自定义算子接口说明](doc/README_PLUGIN.md)。
 
+### 合并 kernel 后重新标定段序
+
+段序 PR #50 应在 kernel PR #35/#40/#41/#44/#45/#48 和 #52 合入后收口。
+新增或改变 kernel TU 后，按 [段序测量与重新基线化流程](doc/device_section_order.md)
+重新构建、检查绝对 device VMA 并复核固定测例，再更新合并树 fingerprint。
+独立 PR 中因 anchor 缺失而通过的 configure 不能证明完整合并树的布局；
+指纹一致也仅证明 TU 顺序一致，不保证设备绝对地址或性能一致。
+
 ## 目录结构
 
 ```

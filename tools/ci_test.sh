@@ -17,6 +17,10 @@ python -m pip install -r ../requirements.txt
 FAILED_STEP="编译 teco kernel"
 echo "======================================================"
 echo "compile teco kernel"
+# CI must not lose the device-section-order pin silently: the configure step is
+# the only place that sees the final TU order, so a fingerprint mismatch has to
+# be fatal here (developer builds keep the warning default).
+export TECO_OPS_CMAKE_ARGS="${TECO_OPS_CMAKE_ARGS:-} -DTECO_OPS_DEVICE_SECTION_ORDER_STRICT=ON"
 pushd ..
     source /opt/tecoai/setvars.sh && bash ./build.sh --build teco
 popd
