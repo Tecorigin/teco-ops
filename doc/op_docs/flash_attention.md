@@ -95,8 +95,8 @@ tecoopsFlashAttention参数信息
 | max_seqlen_q   | 输入      | 主机端        | 最大 query 序列长度                                                |
 | max_seqlen_k   | 输入      | 主机端        | 最大 KV 序列长度                                                   |
 | max_block_num  | 输入      | 主机端        | KV cache 中最大 block 数量                                         |
-| q_seq_lens     | 输入      | 主机端        | 每 batch 的 query 长度，`[batch_size]`                           |
-| kv_seq_lens    | 输入      | 主机端        | 每 batch 的 KV 长度，`[batch_size]`                              |
+| q_seq_lens     | 输入      | 设备端        | 每 batch 的 query 长度，`[batch_size]`                           |
+| kv_seq_lens    | 输入      | 设备端        | 每 batch 的 KV 长度，`[batch_size]`                              |
 | blockTableDesc | 输入      | 主机端        | block table 描述符                                                 |
 | blockTable     | 输入      | 设备端        | block id 映射表，`[batch_size, block_table_dim]` int32           |
 | qDataDesc      | 输入      | 主机端        | Q 数据描述符                                                       |
@@ -125,6 +125,15 @@ tecoopsFlashAttention参数信息
 | kv_seq_lens   | int32    | `[batch_size]`                                     | Array    |
 | oData         | float16  | `[total_q, num_heads, head_size]`                  | Array    |
 | workspace     | void*    | 标量                                                 | -        |
+
+### PyTorch 绑定的变长元数据
+
+SDAA kernel 直接读取设备端的 `q_seq_lens` 与 `kv_seq_lens` 指针。PyTorch
+绑定从设备端 `cu_seqlens_q` 的相邻元素差分生成连续的 `q_seq_lens`，不把
+累积长度拷回 CPU，也不再把派生数组复制回设备；`seqused_k` 直接作为
+`kv_seq_lens` 使用。绑定在派发前把句柄绑定到调用方当前 SDAA stream，保证
+元数据差分与 attention kernel 的顺序。这样保持 C API 的 `[batch_size]` ABI
+不变，同时避免每次变长调用的主机同步。
 
 ## 性能优化
 
@@ -230,3 +239,36 @@ tecoops.flash_attn_varlen_func(
     seqused_k=seqused_k, causal=True, block_table=block_table, out=out,
 )
 ```
+
+## 序列长度契约变更：主机端 → 设备端
+
+本 PR 之前，绑定层会把主机端的序列长度读回主机再传给 kernel；现在
+`q_seq_lens` / `kv_seq_lens` 由 kernel 直接在**设备端**读取，绑定层不再做 D2H 同步，也不再
+接受主机端长度数组。
+
+- 调用方（Python 侧）必须传入**设备端**张量：`cu_seqlens_q` 与 `seqused_k` 都要在 `sdaa` 上。
+  绑定层不再做任何 D2H/H2D 搬运，但会做显式的设备张量校验（而非把主机地址当设备地址解释）：
+  - `cu_seqlens_q` 必须是 **SDAA 设备张量**；
+  - dtype 必须是 **int32**；
+  - 必须 **contiguous**；
+  - 必须与 `q` **同设备**。
+  任何一条不满足都会在绑定层抛出 `RuntimeError`（`TORCH_CHECK`），错误信息点明
+  device-tensor contract；主机/CPU 张量不再被静默当作设备地址解释成未定义行为。
+  负例覆盖见 `python_api_test/test_flash_attention.py` 的 `test_negative_host_cu_seqlens`。
+- `cu_seqlens_k` 是历史 ABI 参数但**kernel 不解引用**（KV 长度由设备端 `seqused_k` 提供），
+  因此绑定层**不对它做设备校验**，并接受缺省/空张量（现有调用方与测试即如此）；若未来
+  kernel 开始消费它，需按 `cu_seqlens_q` 同样的契约校验。
+- 该变更只影响“长度从哪里读”，不改变 mask 语义、分页寻址或输出 dtype；`cu_seqlens_q`
+  仍表示累计长度（`[batch+1]`），`seqused_k` 仍表示每 batch 实际 KV 长度（`[batch]`）。
+- 依赖旧“主机端读取”行为的第三方调用方需要自行把长度张量搬到设备端后再调用。
+- **`cu_seqlens_q` 必须单调不减**：绑定层用相邻元素差分得到每 batch 的 query 长度
+  （`q_seq_lens[b] = cu_seqlens_q[b + 1] - cu_seqlens_q[b]`），因此 `cu_seqlens_q[0]` 必须为 0、
+  且序列长度不能为负；非单调输入会派生出负长度，kernel 侧不保证行为（当前不做额外的主机侧
+  校验，以免引入 D2H 同步）。这是本 PR 相对旧“主机端读取”路径新增的前置条件。
+- 长度为 0 的序列（`cu_seqlens_q[b] == cu_seqlens_q[b + 1]`）在该 ABI 下是**有定义的输入**：
+  它派生出 `q_seq_lens[b] == 0`，该 batch 不产生 query 行，也不写任何输出元素。
+  这不是假想形状：vLLM v1 会把 batch 补齐到 cudagraph 尺寸，补齐出来的序列 query 长度即为 0
+  （上游 `vllm/v1/attention/backends/gdn_attn.py` 显式注明 “Exclude zero-length padded sequences
+  from prefill count”），所以变长后端必须容忍 `q_seq_lens[b] == 0`。
+  回归用例见 `python_api_test/test_flash_attention.py::test_zero_length_padded_batch`
+  （`q_lens = [0, 2]` 与 `[3, 0, 2]`，断言不崩、非零序列输出与参考一致）。

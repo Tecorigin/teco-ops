@@ -115,15 +115,58 @@ void flash_attn_varlen_func_torch(
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
-    // parse q_seq_lens
-    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
-    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
-    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
-    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
-    for (int b = 0; b < batch_size; b++) {
-        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
-    }
-    auto q_lens = q_lens_cpu.to("sdaa");
+    // The kernel reads the length metadata directly from device memory, so a
+    // host tensor would be silently reinterpreted as a device address
+    // (undefined behaviour). Validate the documented device-tensor contract up
+    // front so misuse fails loudly instead.
+    //
+    // is_privateuseone() means "any PrivateUse1 backend", not "the SDAA
+    // backend". SDAA is currently the only PrivateUse1 backend registered in
+    // this stack, so the two are equivalent here; the TORCH_CHECK right below
+    // (cu_seqlens_q.device() == q.device()) also pins the tensor to q's device,
+    // so one from a hypothetical second PrivateUse1 backend cannot slip through
+    // silently. If such a backend is ever added, replace this predicate with an
+    // explicit backend check instead of relying on is_privateuseone().
+    // (C++ ATen has no is_sdaa(); SDAA tensors are the PrivateUse1 backend,
+    // hence is_privateuseone().)
+    TORCH_CHECK(cu_seqlens_q.defined() && cu_seqlens_q.is_privateuseone(),
+                "flash_attn_varlen_func: cu_seqlens_q must be an SDAA device "
+                "tensor; host/CPU tensors are reinterpreted as device "
+                "addresses by the kernel and violate the device-tensor "
+                "contract (see doc/op_docs/flash_attention.md)");
+    TORCH_CHECK(cu_seqlens_q.scalar_type() == torch::kInt32,
+                "flash_attn_varlen_func: cu_seqlens_q must have dtype int32, got ",
+                cu_seqlens_q.scalar_type());
+    TORCH_CHECK(cu_seqlens_q.is_contiguous(),
+                "flash_attn_varlen_func: cu_seqlens_q must be contiguous");
+    TORCH_CHECK(cu_seqlens_q.device() == q.device(),
+                "flash_attn_varlen_func: cu_seqlens_q must reside on the same "
+                "device as q (", q.device(), "), got ", cu_seqlens_q.device());
+    TORCH_CHECK(cu_seqlens_q.dim() == 1 &&
+                cu_seqlens_q.numel() >= static_cast<int64_t>(batch_size) + 1,
+                "flash_attn_varlen_func: cu_seqlens_q must be a 1-D tensor with "
+                "at least batch_size + 1 elements (", batch_size + 1,
+                "); got shape ", cu_seqlens_q.sizes());
+    // cu_seqlens_k is part of the historical ABI but is NOT dereferenced by the
+    // kernel: the KV lengths come from seqused_k (device side) instead.  It is
+    // therefore deliberately not validated -- existing callers (including the
+    // python tests) pass an empty/default-constructed tensor here, and rejecting
+    // that would break compatibility for a tensor the kernel never reads.  Any
+    // future kernel that starts consuming it must validate it with the same
+    // device/dtype/contiguity contract as cu_seqlens_q.
+    (void)cu_seqlens_k;
+
+    // The kernel consumes q_seq_lens on device. Derive it from the device-side
+    // cumulative lengths without a D2H sync followed by an H2D copy. The
+    // subtraction produces a contiguous [batch_size] tensor for the ABI.
+    auto q_lens = (
+        cu_seqlens_q.narrow(0, 1, batch_size) -
+        cu_seqlens_q.narrow(0, 0, batch_size)).contiguous();
+
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the Teco-Ops launch ordered with the device-side metadata
+    // subtraction and the caller's other PyTorch work.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
 
     if (!out.defined()) {
         out = torch::zeros_like(q);
@@ -131,7 +174,6 @@ void flash_attn_varlen_func_torch(
         out.zero_();
     }
 
-    tecoopsHandle_t handle = getGlobalHandle();
     tecoopsTensorDescriptor_t blockTableDesc, qDataDesc, kCacheDesc, vCacheDesc, oDataDesc;
     auto make_desc = [&](tecoopsTensorDescriptor_t &desc, tecoopsDataType_t dtype,
                          torch::Tensor &t) {

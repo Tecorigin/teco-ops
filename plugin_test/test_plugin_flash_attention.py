@@ -67,6 +67,23 @@ def create_plugin_onnx_model(input_shapes, attributes):
     return model
 
 
+def check_output(name, out, expected_shape):
+    """Assert the plugin produced a real, finite, non-degenerate result.
+
+    The plugin Enqueue() discards the tecoopsFlashAttention() return status, so a
+    NOT_SUPPORTED rejection (e.g. ALGO0 requires block_size == 32) would leave the
+    output buffer uninitialised and the old shape-only check would still print OK.
+    These fixtures therefore only use the supported block_size == 32, and this
+    check verifies the values are finite and non-constant so a masked
+    non-computation cannot pass as OK.
+    """
+    assert out.shape == expected_shape, f"{name}: shape mismatch: {out.shape}"
+    values = np.asarray(out, dtype=np.float32)
+    assert np.isfinite(values).all(), f"{name}: non-finite values in output"
+    assert values.std() > 0.0, f"{name}: output is constant, kernel likely did not run"
+    print(f"OK (shape={out.shape}, finite, non-constant)")
+
+
 def test_prefill():
     """prefill: L=S=64"""
     print("  prefill (L=S=64)...", end=" ")
@@ -102,14 +119,17 @@ def test_prefill():
     ctx.set_input(5, sq)
     ctx.executor_run()
     out = ctx.get_output(0)
-    assert out.shape == (L, H, HS), f"shape mismatch: {out.shape}"
-    print(f"OK (shape={out.shape})")
+    check_output("prefill", out, (L, H, HS))
 
 
 def test_decode():
     """decode: L=1, S=128"""
+    # ALGO0 dispatch requires block_size == 32 (find_flash_attention.cpp); a
+    # block_size of 128 used to be rejected with NOT_SUPPORTED while this smoke
+    # test still printed OK (the plugin Enqueue() discards the C ABI status and
+    # the output buffer was never written), so use the supported 32 here.
     print("  decode (L=1, S=128)...", end=" ")
-    H, KV, HS, BS = 8, 4, 64, 128
+    H, KV, HS, BS = 8, 4, 64, 32
     L, S = 1, 128
     blk = (S + BS - 1) // BS
     np.random.seed(43)
@@ -141,13 +161,15 @@ def test_decode():
     ctx.set_input(5, sq)
     ctx.executor_run()
     out = ctx.get_output(0)
-    print(f"OK (shape={out.shape})")
+    check_output("decode", out, (L, H, HS))
 
 
 def test_chunked_prefill():
     """chunked prefill: L=32, S=64"""
+    # Same ALGO0 block_size == 32 constraint as test_decode
+    # (see teco/ual/ops/flash_attention/find_flash_attention.cpp).
     print("  chunked prefill (L=32, S=64)...", end=" ")
-    H, KV, HS, BS = 8, 4, 64, 64
+    H, KV, HS, BS = 8, 4, 64, 32
     L, S = 32, 64
     blk = (S + BS - 1) // BS
     np.random.seed(44)
@@ -179,7 +201,7 @@ def test_chunked_prefill():
     ctx.set_input(5, sq)
     ctx.executor_run()
     out = ctx.get_output(0)
-    print(f"OK (shape={out.shape})")
+    check_output("chunked prefill", out, (L, H, HS))
 
 
 if __name__ == "__main__":
@@ -192,5 +214,5 @@ if __name__ == "__main__":
     test_chunked_prefill()
 
     print("=" * 60)
-    print("All smoke tests passed (no crash = OK)")
+    print("All smoke tests passed (shape + finite + non-constant outputs verified)")
     print("=" * 60)

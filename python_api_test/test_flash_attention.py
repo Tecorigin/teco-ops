@@ -57,6 +57,7 @@ def flash_attn_varlen_func_ref(
     """CPU 参考: flash_attn_varlen_func
 
     与 test/zoo/teco/flash_attention/flash_attention.py 中的实现一致。
+    支持 q_seq_lens[i] == 0 的 batch（vLLM cudagraph padding 形态，对应 batch 输出 0 行且直接跳过计算）。
     """
     _, num_heads, head_size = q.shape
     _, block_size, num_kv_heads, _ = k_cache.shape
@@ -75,6 +76,9 @@ def flash_attn_varlen_func_ref(
         L = int(q_seq_lens[i])
         S = int(kv_seq_lens[i])
 
+        if L == 0:
+            continue
+
         block_ids = block_table[i, :cdiv(S, block_size)].to(torch.long)
         k_ = k_cache.index_select(0, block_ids).reshape(-1, num_kv_heads, head_size)[:S]
         v_ = v_cache.index_select(0, block_ids).reshape(-1, num_kv_heads, head_size)[:S]
@@ -87,7 +91,7 @@ def flash_attn_varlen_func_ref(
         # Causal mask
         attn_bias = torch.zeros(L, S, dtype=q.dtype, device=q.device)
         if causal:
-            attn_mask = torch.ones(S, S, dtype=torch.bool, device=q.device).tril(diagonal=0).logical_not()[-L:]
+            attn_mask = torch.ones(L, S, dtype=torch.bool, device=q.device).tril(diagonal=S - L).logical_not()
             attn_bias = attn_bias.masked_fill_(attn_mask, float("-inf"))
 
         # Q: [L, num_heads, head_size] -> [num_heads, L, head_size]
@@ -199,7 +203,8 @@ def _run_one_fa_test(
     cu_seqlens_q = cu_seqlens_q.to("sdaa")
     seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
     bt_dev = block_table.to("sdaa")
-    out_dev = torch.empty_like(q_dev)
+    # Seed the output so a missing write cannot be hidden by an empty tensor.
+    out_dev = torch.full_like(q_dev, 7.0)
 
     tecoops.flash_attn_varlen_func(
         q_dev, k_dev, v_dev,
@@ -366,6 +371,114 @@ def test_multi_batch():
 
     return all_ok
 
+
+def test_zero_length_padded_batch():
+    """0 长度 padded 序列（vLLM cudagraph padding 的真实形态）。
+
+    vLLM v1 的 attention metadata 会把 batch 补齐到 cudagraph 尺寸，补齐出来的序列
+    query 长度为 0（vllm/v1/attention/backends/gdn_attn.py 里显式 "Exclude zero-length
+    padded sequences from prefill count"）。这里构造 q_lens 含 0 的变长 batch，断言：
+      * kernel 不崩、其余序列的输出与参考逐元素一致；
+      * 0 长度 batch 不产生任何输出行（total_q 只累加非零长度）。
+    """
+    print("-" * 60)
+    print("zero-length padded 测试 (q_lens 含 0)")
+    all_ok = True
+
+    cases = [
+        ("zero_len_leading", 8, 4, 128, 32, [0, 2], [64, 64]),
+        ("zero_len_middle", 8, 4, 128, 32, [3, 0, 2], [32, 64, 96]),
+    ]
+
+    for name, H, KV, HS, BS, q_lens, kv_lens in cases:
+        q, kc, vc, bt = _make_random_fa_inputs(q_lens, kv_lens, H, KV, HS, BS)
+        ok, _ = _run_one_fa_test(q, kc, vc, q_lens, kv_lens, bt, label=name)
+        all_ok = all_ok and ok
+
+    return all_ok
+
+
+def test_negative_short_cu_seqlens():
+    """Reject short cumulative metadata before slicing or touching output."""
+    q_lens, kv_lens = [1, 2], [32, 64]
+    q, kc, vc, bt = _make_random_fa_inputs(q_lens, kv_lens, 8, 4, 128, 32)
+    q, kc, vc, bt = (x.contiguous().to("sdaa") for x in (q, kc, vc, bt))
+    used = torch.tensor(kv_lens, dtype=torch.int32, device="sdaa")
+    for values in ([], [0], [0, 1]):
+        out = torch.full_like(q, 7.0)
+        cu = torch.tensor(values, dtype=torch.int32, device="sdaa")
+        try:
+            tecoops.flash_attn_varlen_func(
+                q, kc, vc, 2, cu, 64, torch.empty(0), used,
+                1.0 / math.sqrt(128), True, torch.empty(0), bt, False, out)
+        except RuntimeError as exc:
+            if "at least batch_size + 1" not in str(exc):
+                raise AssertionError(f"unexpected metadata error: {exc}") from exc
+            assert torch.equal(out.cpu(), torch.full_like(out.cpu(), 7.0))
+            print(f"  [negative_short_cu_{len(values)}] PASSED (sentinel untouched)")
+        else:
+            raise AssertionError("short cu_seqlens_q was accepted")
+    return True
+
+
+def test_negative_host_cu_seqlens():
+    """负例: 主机端 cu_seqlens_q 必须报错, 而不是被静默当作设备地址解释
+
+    绑定契约 (doc/op_docs/flash_attention.md): cu_seqlens_q / cu_seqlens_k
+    必须是 SDAA 设备张量 (int32 / contiguous / 与 q/k 同设备)。
+    本用例传入 CPU 张量, 断言抛出 RuntimeError 且错误信息说明该契约。
+    """
+    print("-" * 60)
+    print("negative 测试 (host cu_seqlens_q 必须抛 RuntimeError)")
+
+    q_seq_lens, kv_seq_lens = [32], [64]
+    q, kc, vc, bt = _make_random_fa_inputs(q_seq_lens, kv_seq_lens, 8, 4, 128, 32)
+    head_size = q.shape[-1]
+
+    q_dev = q.contiguous().to("sdaa")
+    k_dev = kc.contiguous().to("sdaa")
+    v_dev = vc.contiguous().to("sdaa")
+    bt_dev = bt.to("sdaa")
+    seqused_k = torch.tensor(kv_seq_lens, dtype=torch.int32).to("sdaa")
+    out_dev = torch.empty_like(q_dev)
+
+    # 主机端 (CPU) cu_seqlens_q —— 违反设备张量契约
+    cu_seqlens_q_cpu = torch.tensor([0, 32], dtype=torch.int32)
+
+    try:
+        tecoops.flash_attn_varlen_func(
+            q_dev, k_dev, v_dev,
+            max(q_seq_lens),
+            cu_seqlens_q_cpu,
+            max(kv_seq_lens),
+            torch.Tensor(),       # cu_seqlens_k (unused)
+            seqused_k,
+            1.0 / math.sqrt(float(head_size)),
+            True,
+            torch.Tensor(),       # window_size (unused)
+            bt_dev,
+            False,                # return_softmax_lse
+            out_dev,
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        # 错误信息必须点明设备张量契约, 而不是任意崩溃
+        if "cu_seqlens_q" in msg and "contract" in msg:
+            print(f"  [{'negative_host_cu_seqlens':30s}] PASSED "
+                  f"(RuntimeError: {msg.splitlines()[0][:80]}...)")
+            return True
+        print(f"  [{'negative_host_cu_seqlens':30s}] FAILED "
+              f"(RuntimeError raised but contract not mentioned): {msg}")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"  [{'negative_host_cu_seqlens':30s}] FAILED "
+              f"(unexpected {type(e).__name__}): {e}")
+        return False
+
+    print(f"  [{'negative_host_cu_seqlens':30s}] FAILED "
+          f"(no exception raised for host cu_seqlens_q)")
+    return False
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -388,6 +501,9 @@ if __name__ == "__main__":
         ("test_chunked_prefill",  test_chunked_prefill),
         ("test_gqa",  test_gqa),
         ("test_multi_batch",  test_multi_batch),
+        ("test_zero_length_padded_batch",  test_zero_length_padded_batch),
+        ("test_negative_host_cu_seqlens",  test_negative_host_cu_seqlens),
+        ("test_negative_short_cu_seqlens", test_negative_short_cu_seqlens),
     ]
 
     all_passed = True

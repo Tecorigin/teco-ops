@@ -102,6 +102,9 @@ def flash_attn_varlen_func(
     for i in range(batch_size):
         L = int(q_seq_lens[i])
         S = int(kv_seq_lens[i])
+        # Padded batches own no output rows; [-0:] would select the whole mask.
+        if L == 0:
+            continue
 
         block_ids = block_table[i, :cdiv(S, block_size)].to(torch.long)
         k_ = k_cache.index_select(0, block_ids).reshape(-1, num_kv_heads, head_size)[:S]
@@ -115,7 +118,7 @@ def flash_attn_varlen_func(
         # Causal mask bias: [q_seq_len, kv_seq_len]
         attn_bias = torch.zeros(L, S, dtype=q.dtype, device=q.device)
         if causal:
-            attn_mask = torch.ones(S, S, dtype=torch.bool, device=q.device).tril(diagonal=0).logical_not()[-L:]
+            attn_mask = torch.ones(L, S, dtype=torch.bool, device=q.device).tril(diagonal=S - L).logical_not()
             attn_bias = attn_bias.masked_fill_(attn_mask, float("-inf"))
 
         # Q: [L, num_heads, head_size] -> [num_heads, L, head_size]
