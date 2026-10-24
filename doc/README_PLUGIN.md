@@ -394,6 +394,38 @@ export LD_LIBRARY_PATH=<lib_path>:${LD_LIBRARY_PATH}
 2. ONNX 模型节点指定了 `domain="my_custom_ops"`
 3. 模型添加了 `helper.make_opsetid("my_custom_ops", 1)`
 
+## FlashAttention 长度输入迁移（PR #42）
+
+`plugin_flash_attention` 的第五个输入现在名为 `q_seq_lens`，类型为 int32，
+形状为 `[batch_size]`，每项是该序列本次调用的 query 数量。旧输入名
+`cu_seqlens_q` 及其累计长度 `[batch_size + 1]` 不再是这个 Plugin 的输入契约；
+本版本没有旧名别名。仅改名称而继续传累计数组会违反 shape/长度语义。
+
+迁移旧 ONNX 图和推理脚本时，同时修改图输入、节点输入、Plugin 注册的
+`.Desc()` 和运行时 feed 的名称及 shape，并重新转换、编译模型。累计长度可在
+导出或准备请求元数据时转换为每序列长度，例如：
+
+```python
+import numpy as np
+
+cu_seqlens_q = np.asarray([0, 3, 3, 8], dtype=np.int32)
+q_seq_lens = np.ascontiguousarray(np.diff(cu_seqlens_q), dtype=np.int32)
+assert q_seq_lens.tolist() == [3, 0, 5]
+# ONNX input: name="q_seq_lens", dtype=INT32, shape=[3]
+# Engine feed: use "q_seq_lens" and upload q_seq_lens as a device input.
+```
+
+累计数组应从 0 开始、单调不减，最后一项等于 `q.shape[0]`；转换后长度之和
+仍须等于 `q.shape[0]`。`seqused_k` 保持每序列实际 KV 长度 `[batch_size]`。
+独立参考与显式 scale 的 Plugin 回归入口为
+`plugin_test/test_plugin_flash_attention.py`，迁移后应重新运行。
+
+该迁移仅针对本 PR 的 Plugin 图输入；Python
+`tecoops.flash_attn_varlen_func(..., cu_seqlens_q=...)` 仍接收累计长度。
+与 #39 的累计长度 Plugin 入口合并时，应按
+[共享接入收据](https://github.com/Tecorigin/teco-ops/blob/d19d709/doc/pr-integration-20261024.md)
+统一图和 C API 的元数据语义，不能混用两种长度数组。
+
 ## License
 
 请参考项目根目录的 LICENSE 文件。

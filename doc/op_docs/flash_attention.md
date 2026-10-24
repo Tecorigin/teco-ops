@@ -85,6 +85,47 @@ tecoops.flash_attn_varlen_func(
 )
 ```
 
+### 显式 scale 与兼容性
+
+`tecoopsFlashAttentionWithScale` 在原 C 接口 `max_block_num` 后新增 `float softmax_scale`，其余参数和布局一致。
+原 `tecoopsFlashAttention` 符号及默认 `1/sqrt(head_size)` 语义保持不变。
+Python `flash_attn_varlen_func` 的已有 `softmax_scale` 参数现在传到 kernel，有限零值和负值也按公式计算；非有限值拒绝执行。
+`softmax_scale=0` 会使所有有效 QK 分数变为 0，因此 softmax 在当前 query 可见的 KV 项上得到均匀 attention 权重；
+`softmax_scale=1` 则使用未缩放的 QK 内积作为分数。
+Python pybind 的完整位置参数 ABI 不变，调用方仍应显式提供 scale。
+该修复不改变 causal/window 支持或 kernel 数学实现。Gemma 的 scale=1 需要这项修复；D512 容量支持另见 PR41，本 PR 未做模型接入或性能声明。
+
+### 两个 C 入口对照
+
+| 入口 | `softmax_scale` 来源 | 非法值行为 |
+| --- | --- | --- |
+| `tecoopsFlashAttention` | 固定默认 `1/sqrt(head_size)`（由 `qDataDesc->dimA[2]` 推出），调用方不可指定 | 无 scale 参数可校验 |
+| `tecoopsFlashAttentionWithScale` | 调用方显式传入 `float softmax_scale` | 非有限值（NaN/±inf、以及不可表示为 float32 的量级）先在 Python 绑定层拒绝并抛异常；interface 层再做一次 `isfinite` 复核，返回 `TECOOPS_STATUS_BAD_PARAM`，不写输出 |
+
+两个入口除 scale 一个标量外，其余参数、布局、dtype 限制和 kernel 分支完全一致。已有调用方
+（含 plugin）继续用原符号即可；需要非默认 scale 的调用方（如 Gemma 的 `scale=1`）应改调
+`tecoopsFlashAttentionWithScale`，Python 侧走 `flash_attn_varlen_func(..., softmax_scale=...)`
+即可，位置参数 ABI 不变。
+
+**plugin 层已接通可选 scale（fail-closed）**：`teco/plugin/pluginFlashAttention/`
+`plugin_flash_attention.cc` 的 attrs 新增 `has_softmax_scale`（int64，默认 0）与
+`softmax_scale`（double）。`has_softmax_scale=0` 保持既有行为（调用
+`tecoopsFlashAttention`，默认 `1/sqrt(head_size)`）；`=1` 时先校验有限且可表示为 float32，
+再调用 `tecoopsFlashAttentionWithScale`，非法值在 Enqueue 阶段直接抛出，**不会**静默回落到
+默认 scale。旧模型（不带该 attr）行为不变，因此不存在"调用方以为设了 scale、实际用了默认值"
+的情形；C ABI 返回码也在插件侧检查，派发失败不再表现为未写入的输出。
+
+`plugin_test/test_plugin_flash_attention.py` 的 `test_explicit_scale` 用 scale=0 与默认路径
+对拍（同一组张量运行两次必须得到不同输出），并断言两次输出都有限，构成 explicit-scale 通路
+真的生效的数值门禁。
+
+**plugin 属性与 ONNX 构造契约**：TVM 插件机制（`tvm/plugin/plugin_register.py` 中的 `get_relay_func`）
+在解析 ONNX 节点时，会遍历插件注册的全部属性名并在 ONNX 节点属性字典中取值（`attrs[key]`），
+不会回落到 C++ 注册的默认值。因此 ONNX 构造侧必须保证所有已注册属性（`max_seqlen_q`、`max_seqlen_k`、
+`max_block_num`、`has_softmax_scale`、`softmax_scale`）均出现在 ONNX 节点的属性中。
+测试中的 `create_plugin_onnx_model` 统一提供 `has_softmax_scale=0`（int）与 `softmax_scale=0.0`（float）默认值，
+既有调用点无需逐一改动即可构造合法 ONNX 节点，调用方显式指定时以传入值为准。
+
 ### 参数信息
 
 tecoopsFlashAttention参数信息
@@ -230,3 +271,17 @@ tecoops.flash_attn_varlen_func(
     seqused_k=seqused_k, causal=True, block_table=block_table, out=out,
 )
 ```
+
+## `softmax_scale` 语义
+
+- 入口：Python 侧 `tecoops.flash_attn_varlen_func(..., softmax_scale=...)` 走
+  `tecoopsFlashAttentionWithScale`。**不传**时保持原有 ABI 语义：C API 用
+  `1 / sqrt(head_dim)`（`qDataDesc->dimA[2]`）。
+- 校验：`softmax_scale` 必须是**有限值**且可表示为 float32。
+  绑定层（`api/torch_ext.cpp`）拒绝 NaN/±inf 与超出 float32 范围的输入并抛 Python 异常；
+  interface（`teco/interface/ops/flash_attention.cpp`）再做一次 `isfinite` 复核，返回
+  `TECOOPS_STATUS_BAD_PARAM`。失败不会返回未写入的输出。
+- 取值含义：`scale > 0` 为常规缩放（`QK^T * scale`，越大分布越尖锐）；`scale = 0` 得到
+  **均匀注意力**（所有参与 tile 权重相同，等价于对可见 KV 求平均）；负值在数值上等价于
+  logits 取反后再 softmax，代码不做额外拒绝，但不建议依赖该用法。
+- `scale` 只影响 softmax 前的 logits 缩放，不改变 causal mask、分页寻址或输出 dtype/形状。

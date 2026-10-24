@@ -27,6 +27,8 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <cmath>
+#include <limits>
 #include <torch/extension.h>
 #include <torch_sdaa/sdaa_extension.h>
 
@@ -112,6 +114,12 @@ void flash_attn_varlen_func_torch(
     bool return_softmax_lse,
     torch::Tensor out) {
 
+    const double max_scale = std::numeric_limits<float>::max();
+    TORCH_CHECK(std::isfinite(softmax_scale) &&
+                softmax_scale >= -max_scale && softmax_scale <= max_scale,
+                "softmax_scale must be finite and representable as float32");
+    const float scale = static_cast<float>(softmax_scale);
+
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
@@ -147,8 +155,8 @@ void flash_attn_varlen_func_torch(
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
 
-    tecoopsFlashAttention(handle,
-                          max_seqlen_q, max_seqlen_k, max_block_num,
+    tecoopsFlashAttentionWithScale(handle,
+                          max_seqlen_q, max_seqlen_k, max_block_num, scale,
                           (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
                           blockTableDesc, block_table.data_ptr(),
                           qDataDesc, q.data_ptr(),

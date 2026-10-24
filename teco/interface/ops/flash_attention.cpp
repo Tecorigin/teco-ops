@@ -27,6 +27,8 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <cmath>
+
 #include "ual/ops/flash_attention/flash_attention.hpp"
 
 #include "interface/common/convert.h"
@@ -68,9 +70,9 @@ static tecoopsStatus_t flashAttentionCheckArgs(tecoopsHandle_t handle,
     return TECOOPS_STATUS_SUCCESS;
 }
 
-tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
+tecoopsStatus_t tecoopsFlashAttentionWithScale(tecoopsHandle_t handle,
                                       int max_seqlen_q, int max_seqlen_k,
-                                      int max_block_num, const int *q_seq_lens,
+                                      int max_block_num, float softmax_scale, const int *q_seq_lens,
                                       const int *kv_seq_lens, 
                                       const tecoopsTensorDescriptor_t blockTableDesc,
                                       const void *blockTable,
@@ -88,6 +90,11 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
         return TECOOPS_STATUS_NOT_INITIALIZED;
     }
 
+    if (!std::isfinite(softmax_scale)) {
+        ERROR("softmax_scale must be finite\n");
+        return TECOOPS_STATUS_BAD_PARAM;
+    }
+
     FlashAttentionArgs args;
     args.spe_num = handle->spe_num;
     args.batch_size = blockTableDesc->dimA[0];
@@ -99,7 +106,7 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
     args.max_q_seq_len = max_seqlen_q;              // useless
     args.max_k_seq_len = max_seqlen_k;
     args.max_block_num = kCacheDesc->dimA[0];
-    args.softmax_scale = 1.0 / sqrtf(double(args.size_per_head));
+    args.softmax_scale = softmax_scale;
     args.q_seq_lens = q_seq_lens;
     args.kv_seq_lens = kv_seq_lens;
     args.block_table = (int *)blockTable;
@@ -116,4 +123,30 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
     RUN_OP(FlashAttentionOp, args, patch_arg, handle);
 
     return TECOOPS_STATUS_SUCCESS;
+}
+
+tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
+                                      int max_seqlen_q, int max_seqlen_k,
+                                      int max_block_num, const int *q_seq_lens,
+                                      const int *kv_seq_lens,
+                                      const tecoopsTensorDescriptor_t blockTableDesc,
+                                      const void *blockTable,
+                                      const tecoopsTensorDescriptor_t qDataDesc,
+                                      const void *qData,
+                                      const tecoopsTensorDescriptor_t kCacheDesc,
+                                      const void *kCache,
+                                      const tecoopsTensorDescriptor_t vCacheDesc,
+                                      const void *vCache,
+                                      const tecoopsTensorDescriptor_t oDataDesc,
+                                      void *oData, void *workspace) {
+    // Keep legacy validation before reading qDataDesc for the default scale.
+    const auto input_error = flashAttentionCheckArgs(handle, kCacheDesc, vCacheDesc);
+    checkTecoopsStatus(input_error);
+    // Preserve the original ABI and its default scale.
+    const float softmax_scale = 1.0f / std::sqrt(float(qDataDesc->dimA[2]));
+    return tecoopsFlashAttentionWithScale(handle,
+        max_seqlen_q, max_seqlen_k, max_block_num, softmax_scale,
+        q_seq_lens, kv_seq_lens, blockTableDesc, blockTable,
+        qDataDesc, qData, kCacheDesc, kCache, vCacheDesc, vCache,
+        oDataDesc, oData, workspace);
 }

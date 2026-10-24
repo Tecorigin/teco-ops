@@ -168,6 +168,22 @@ tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
                                       const tecoopsTensorDescriptor_t oDataDesc,
                                       void *oData, void *workspace);
 
+// Explicit finite scale; the original entry keeps 1/sqrt(head_size).
+tecoopsStatus_t tecoopsFlashAttentionWithScale(tecoopsHandle_t handle,
+                                      int max_seqlen_q, int max_seqlen_k,
+                                      int max_block_num, float softmax_scale, const int *q_seq_lens,
+                                      const int *kv_seq_lens,
+                                      const tecoopsTensorDescriptor_t blockTableDesc,
+                                      const void *blockTable,
+                                      const tecoopsTensorDescriptor_t qDataDesc,
+                                      const void *qData,
+                                      const tecoopsTensorDescriptor_t kCacheDesc,
+                                      const void *kCache,
+                                      const tecoopsTensorDescriptor_t vCacheDesc,
+                                      const void *vCache,
+                                      const tecoopsTensorDescriptor_t oDataDesc,
+                                      void *oData, void *workspace);
+
 tecoopsStatus_t tecoopsCausalConv1d(tecoopsHandle_t handle,
                                     int batch,
                                     int totalSeqLen,
