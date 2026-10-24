@@ -32,6 +32,13 @@
 
 #include "interface/include/tecoops.h"
 
+// Every binding below launches the Teco-Ops kernel on the caller's *current*
+// SDAA stream: each entry binds the shared handle right after acquiring it
+// with tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream()).  Without
+// that bind a handle created on the default stream serializes or reorders the
+// launch against surrounding PyTorch work on a non-default torch.sdaa.Stream().
+// New entries must keep this line; see python_api_test/test_stream_binding.py.
+
 static tecoopsHandle_t g_handle = nullptr;
 
 static tecoopsHandle_t getGlobalHandle() {
@@ -43,6 +50,7 @@ static tecoopsHandle_t getGlobalHandle() {
 
 void flatten_rays_torch(torch::Tensor rays, uint32_t N, uint32_t M, torch::Tensor res) {
     tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     tecoopsFlattenRays(handle,
                        rays.data_ptr<int>(),
                        N, M,
@@ -52,6 +60,7 @@ void flatten_rays_torch(torch::Tensor rays, uint32_t N, uint32_t M, torch::Tenso
 
 void morton3D_invert_torch(torch::Tensor indices, uint32_t N, torch::Tensor coords) {
     tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     tecoopsMorton3DInvert(handle,
                           indices.data_ptr<int>(),
                           N,
@@ -63,6 +72,7 @@ void reshape_and_cache_torch(
     torch::Tensor slot_mapping,
     torch::Tensor key_cache, torch::Tensor value_cache) {
     tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     int num_tokens = key.size(0);
     int num_kv_heads = key.size(1);
     int head_size = key.size(2);
@@ -84,6 +94,7 @@ void rms_norm_torch(
     torch::Tensor output, c10::optional<torch::Tensor> residual_out,
     double eps) {
     tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     int num_tokens = input.size(0);
     int hidden_size = input.size(1);
 
@@ -132,6 +143,7 @@ void flash_attn_varlen_func_torch(
     }
 
     tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
     tecoopsTensorDescriptor_t blockTableDesc, qDataDesc, kCacheDesc, vCacheDesc, oDataDesc;
     auto make_desc = [&](tecoopsTensorDescriptor_t &desc, tecoopsDataType_t dtype,
                          torch::Tensor &t) {
@@ -174,6 +186,7 @@ void causal_conv1d_fn_torch(
     torch::Tensor has_initial_state, // [batch] int8
     int64_t pad_slot_id) {
     tecoopsHandle_t handle = getGlobalHandle();
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
 
     int dim = x.size(0);
     int totalSeqLen = x.size(1);
