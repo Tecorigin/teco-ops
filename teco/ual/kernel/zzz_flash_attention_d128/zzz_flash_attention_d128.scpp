@@ -1,0 +1,1109 @@
+// c25-gemma3 trailing device TU: the BM == 128 (head_dim 128/64) instantiation of
+// flash_attention_half plus the transposed-panel online softmax it needs, split out of
+// flash_attention.scpp so that TU keeps the delivered code layout (the D256/D512
+// instantiations are the only ones left there).  Body copied VERBATIM from the B5
+// candidate (flash_attention.scpp d5606ec1); the six prelude helpers are `static`
+// (linkage only) so the two TUs do not collide at LTO link time.
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice,
+// this list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/flash_attention/flash_attention.h"
+#include "teco_hal.h"
+
+using namespace sdaa;  //NOLINT
+using namespace teco::hal;  //NOLINT
+
+// macro definition of MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+// macro definition of MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+// FLT_MAX if not already defined
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38F
+#endif
+
+// load a tile from KV cache (key or value) into dst
+// src = cache[block_id][kv_head_idx ][0..num_tokens-1][0..head_size-1]
+// dst = [num_tokens, head_size]
+static __device__ __always_inline void load_kv_cache(
+    half *dst, const half *cache, const int *block_table, int logical_block,
+    int kv_head_idx , int kv_head_num, int block_size, int head_size, int num_tokens) {
+    int block_id = block_table[logical_block];
+    const half *src = cache
+        + block_id * kv_head_num * block_size * head_size
+        + kv_head_idx  * block_size * head_size;
+    memcpy(dst, src, num_tokens * head_size * sizeof(half));
+}
+
+static __device__ __always_inline void load_kv_cache_async(
+    half *dst, const half *cache, const int *block_table, int logical_block,
+    int kv_head_idx , int kv_head_num, int block_size, int head_size, int num_tokens,
+    MemcpyHandle &h) {
+    int block_id = block_table[logical_block];
+    const half *src = cache
+        + block_id * kv_head_num * block_size * head_size
+        + kv_head_idx  * block_size * head_size;
+    memcpy_async(dst, src, num_tokens * head_size * sizeof(half), MemcpyGlobalToSpm, h);
+}
+
+static __device__ __always_inline void fill_inf(float *buf, int len) {
+    // if use simd should assert aligned
+    int neg_inf_bit = 0xFF800000;
+    float neg_inf;
+    memcpy(&neg_inf, &neg_inf_bit, sizeof(float));
+    for (int i = 0; i < len; i++) {
+        buf[i] = neg_inf;
+    }
+}
+
+// causal mask on score tile [cur_BM, cur_BN] inside [BM, BN]
+static __device__ __always_inline void apply_causal_mask(
+    float *score, int cur_BM, int cur_BN,
+    int qi_off, int kj_off, int q_seq_len, int k_seq_len,
+    int BM, int BN) {
+
+    int q_start = k_seq_len - q_seq_len;
+    if (q_start < 0) q_start = 0;
+
+    for (int qi = 0; qi < cur_BM; qi++) {
+        int rel_q_pos = q_start + qi_off + qi;
+        int allowed = rel_q_pos - kj_off + 1;
+        if (allowed < 0) allowed = 0;
+        if (allowed >= cur_BN) continue;
+        fill_inf(score + qi * BN + allowed, cur_BN - allowed);
+    }
+}
+
+static __device__ float compute_max(float *input, int size) {
+    floatv16 vf = -FLT_MAX;
+    floatv16 vres = -FLT_MAX;
+    float result = -FLT_MAX;
+    int i = 0;
+
+    for (i = 0; i <= size - 16; i += 16) {
+        simd_load(vf, input + i);
+        vres = simd_max(vf, vres);
+    }
+
+    // handle remaining elements (size not multiple of 16)
+    for (; i < size; i++) {
+        result = MAX(result, input[i]);
+    }
+
+    float *tmp = (float *)&vres;
+    for (int j = 0; j < 16; j++) {
+        result = MAX(result, tmp[j]);
+    }
+    return result;
+}
+
+static __device__ void online_softmax_step(
+    float *scores,           // S: [BM, BN] scores -> exp(S - m_new)
+    const float *pre_max,    // m_old: [m]
+    const float *pre_sum,    // l_old: [m]
+    float *cur_max,          // m_new: [m]
+    float *cur_sum,          // l_new: [m]
+    float *scale,            // scale = exp(m_old - m_new): [m]
+    int m, int n,            // cur_BM, cur_BN
+    int ld_scores) {         // BN
+
+    // Step 1: per-row : cal m_new, scale
+    for (int i = 0; i < m; i++) {
+        float *src_row = scores + i * ld_scores;
+        float m_block = compute_max(src_row, n);
+        float m_new = MAX(pre_max[i], m_block);
+        // m_new = MAX(m_new, 0.0f);
+        cur_max[i] = m_new;
+        scale[i] = expf(pre_max[i] - m_new);
+    }
+
+    // Step 2: inplace scores: S -> exp(S - m_new), cal l_new
+    for (int i = 0; i < m; i++) {
+        float *src_row = scores + i * ld_scores;
+        float m_new = cur_max[i];
+        float l_old = pre_sum[i];
+        float s = scale[i];
+
+        float l_block = 0.0f;
+        int j = 0;
+        for (; j <= n - 16; j += 16) {
+            floatv16 v;
+            simd_load(v, src_row + j);
+            v = simd_exp(v - m_new);
+            simd_store(v, src_row + j);
+            float *vf = (float *)&v;
+            for (int t = 0; t < 16; t++) l_block += vf[t];
+        }
+        for (; j < n; j++) {
+            src_row[j] = expf(src_row[j] - m_new);
+            l_block += src_row[j];
+        }
+        cur_sum[i] = l_old * s + l_block;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Online softmax on one *transposed* score panel (BM == 128 NT path).
+//
+// cst holds S^T of a single 32-query panel: KV row t, query r = r0 + rr lives at
+// cst[t*32 + rr].  A panel row is therefore 32 contiguous query values, so the
+// reduction over the KV index becomes a lane-wise vector accumulation with one
+// query per lane.  Every query keeps its own lane and its additions over t happen
+// in the same order (t = 0, 1, ... cur_BN-1) as the scalar chain of
+// online_softmax_step(), and max() is exact under any association, so the
+// resulting l / m state is bit-identical to the untransposed path.  Only the live
+// query range [0, cur_M) is touched; lanes past it belong to the discarded tail
+// of the last panel.
+// ---------------------------------------------------------------------------
+static __device__ __always_inline void online_softmax_panel_T(
+    float *cst, int r0, int cur_M, int cur_BN,
+    const float *pre_max, const float *pre_sum,
+    float *cur_max, float *cur_sum, float *scale,
+    half *p_score, int BN, int off) {
+    floatv16 vmax0 = -FLT_MAX, vmax1 = -FLT_MAX;
+    for (int t = 0; t < cur_BN; t++) {
+        floatv16 lo, hi;
+        simd_load(lo, cst + t * 32);
+        simd_load(hi, cst + t * 32 + 16);
+        vmax0 = simd_max(vmax0, lo);
+        vmax1 = simd_max(vmax1, hi);
+    }
+    // merge with the previous online max lane-wise: max() is exact under any
+    // association, so this is the same m_new the scalar path produces
+    floatv16 pm0, pm1;
+    simd_load(pm0, pre_max + r0);
+    simd_load(pm1, pre_max + r0 + 16);
+    floatv16 nm0 = simd_max(vmax0, pm0);
+    floatv16 nm1 = simd_max(vmax1, pm1);
+    simd_store(nm0, cur_max + r0);
+    simd_store(nm1, cur_max + r0 + 16);
+
+    // rescale factors: vector exp without stack spill when full panel
+    {
+        const int u_end = MIN(cur_M - r0, 32);
+        if (u_end == 32) {
+            floatv16 diff0 = simd_vfsubs(pm0, nm0);
+            floatv16 diff1 = simd_vfsubs(pm1, nm1);
+            simd_store(vexp(diff0), scale + r0);
+            simd_store(vexp(diff1), scale + r0 + 16);
+        } else {
+            float pbuf[32], mbuf[32];
+            simd_store(pm0, pbuf);
+            simd_store(pm1, pbuf + 16);
+            simd_store(nm0, mbuf);
+            simd_store(nm1, mbuf + 16);
+            int u = 0;
+            for (; u + 16 <= u_end; u += 16) {
+                floatv16 vp, vm;
+                simd_load(vp, pbuf + u);
+                simd_load(vm, mbuf + u);
+                simd_store(vexp(simd_vfsubs(vp, vm)), scale + r0 + u);
+            }
+            for (; u < u_end; u++) {
+                scale[r0 + u] = expf(pbuf[u] - mbuf[u]);
+            }
+        }
+    }
+
+    // pass 2: exp(S - m_new) in place, lane-wise sum over the KV index in order
+    floatv16 vsum0 = 0.0f, vsum1 = 0.0f;
+    for (int t = 0; t < cur_BN; t++) {
+        floatv16 lo, hi;
+        simd_load(lo, cst + t * 32);
+        simd_load(hi, cst + t * 32 + 16);
+        // [c36-MASKSKIP] A 16-lane vector whose lanes are all causally masked holds only
+        // -inf, and exp(-inf - m) is exactly 0 whenever the running max m is finite - which
+        // the first KV tile always guarantees, because key 0 is visible to every query, so
+        // pre_max is finite from tile 1 on.  Skipping the exp and recording 0 is therefore
+        // bit-identical: the same half reaches p_score and the same 0 is added to the sum.
+        const int need = t - off;
+        lo = (need < r0 + 16) ? simd_exp(lo - nm0) : (floatv16)0.0f;
+        hi = (need < r0 + 32) ? simd_exp(hi - nm1) : (floatv16)0.0f;
+        vsum0 = vsum0 + lo;
+        vsum1 = vsum1 + hi;
+        // [c36-SOFTP] P^T -> P fused into this pass: the exp result is already in
+        // registers, so the separate conversion loop's 32 strided (bank-conflicting)
+        // float reads per KV column disappear.  Same values, same rounding: the half
+        // written is (half) of the very float the old loop re-read from cst.
+        // [c41-O2a] one vector f32->f16 convert per half-column, lane values taken straight
+        // from the register, and no per-panel guard: rows >= cur_M are never read back (the
+        // PV GEMM's A view is {cur_M, BN}) and every lane here is a finite exp() or an exact
+        // 0, so the guarded second loop is dead weight.
+        halfv16 hlo = (halfv16)lo;
+        halfv16 hhi = (halfv16)hi;
+#pragma unroll
+        for (int u = 0; u < 16; u++) {
+            p_score[(r0 + u) * BN + t] = hlo[u];
+            p_score[(r0 + 16 + u) * BN + t] = hhi[u];
+        }
+    }
+    const int u_sum_end = MIN(cur_M - r0, 32);
+    if (u_sum_end == 32) {
+        floatv16 ps0, ps1, sc0, sc1;
+        simd_load(ps0, pre_sum + r0);
+        simd_load(ps1, pre_sum + r0 + 16);
+        simd_load(sc0, scale + r0);
+        simd_load(sc1, scale + r0 + 16);
+        simd_store(ps0 * sc0 + vsum0, cur_sum + r0);
+        simd_store(ps1 * sc1 + vsum1, cur_sum + r0 + 16);
+    } else {
+        float sbuf[32];
+        simd_store(vsum0, sbuf);
+        simd_store(vsum1, sbuf + 16);
+        for (int u = 0; u < u_sum_end; u++) {
+            cur_sum[r0 + u] = pre_sum[r0 + u] * scale[r0 + u] + sbuf[u];
+        }
+    }
+}
+
+template <int BM>
+__device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
+    int tid = threadIdx;
+    // SPE work split (D128 / BM == 128 only): the Q blocks of one (batch, head) are fully
+    // independent - each keeps its own online-softmax scan and writes disjoint output rows -
+    // so when the SPE array is wider than the local head count they can be spread over
+    // several SPEs instead of leaving (spe_num - local_head_num) SPEs idle.  parts == 1
+    // reproduces the previous mapping exactly.  Data-driven trip count bound once at entry
+    // from the launch shape: no branch inside the per-tile loops, no implementation switch.
+    int parts = 1;
+    if constexpr (BM == 128) {
+        parts = MAX(1, MIN(2, args.spe_num / args.local_head_num));
+    }
+    if (tid >= MIN(args.spe_num, args.local_head_num * parts)) {
+        return;
+    }
+    // Partition mapping via head == tid % local_head_num, BM == 128 only (parts is capped at
+    // 2 there, so part == tid / local_head_num is 0 or 1).  With parts == 1 the guard above
+    // has already rejected every tid >= local_head_num, so this is exactly the previous
+    // head == tid / part == 0 mapping.
+    int head = tid;
+    int part = 0;
+    if constexpr (BM == 128) {
+        const int h = args.local_head_num;
+        part = tid / h;
+        head = tid - part * h;
+    }
+    int num_kv_groups = args.local_head_num / args.local_kv_head_num;
+
+    int BN = 32;    // N block, 32 for ace; block_size
+    int BK = args.size_per_head;   // head_dim
+    int token_size = args.size_per_head * sizeof(half);
+    int * ldm_block_table = (int*)rt_spm_malloc(args.block_table_dim * sizeof(int));
+    half * qbuf = (half*)rt_spm_malloc(BM * token_size);            // BM * BK
+    half * ktmp0 = (half*)rt_spm_malloc(BN * token_size);           // BN * BK
+    half * ktmp1 = (half*)rt_spm_malloc(BN * token_size);           // BN * BK
+    half * ktmp = ktmp0;
+    // kbuf carries the transposed query block Q^T [BK, BM] on every NT-form path
+    // (BM == 32/64/128, see below).  qbuf is dead once Q^T has been built and is reused
+    // as the per-panel S^T scratch on BM == 128 (see the score pipeline below).
+    int kbuf_n = MAX(BN * BK, BM * BK);
+    half * kbuf = (half*)rt_spm_malloc(kbuf_n * sizeof(half));      // BK * BN | BK * BM
+    float * outc = (float*)rt_spm_malloc(BM * BN * sizeof(float));  // BM * BN
+    half * obuf = kbuf;                                             // BM * BK
+    if constexpr (BM != 128) {
+        obuf = (half*)rt_spm_malloc(BM * token_size);               // BM * BK
+    }
+    float *o_accum = (float*)rt_spm_malloc(BM * BK * sizeof(float)); // BM * BK
+    float *l_prev = (float*)rt_spm_malloc(BM * sizeof(float));       // l  (old)
+    float *m_prev = (float*)rt_spm_malloc(BM * sizeof(float));       // m  (old)
+    float *l_cur  = (float*)rt_spm_malloc(BM * sizeof(float));       // l  (new)
+    float *m_cur  = (float*)rt_spm_malloc(BM * sizeof(float));       // m  (new)
+    float *scale  = (float*)rt_spm_malloc(BM * sizeof(float));       // exp(m_old - m_new)
+    half *p_score = (half*)rt_spm_malloc(BM * BN * sizeof(half));    // BM * BN
+    // ---------------------------------------------------------------------------
+    // c38 cand-1 (schedule only): entry-time LPT assignment of Q blocks to parts.
+    //
+    // Shipped mapping: part p owns the blocks c = 0,1,2,... of *every* batch with
+    // c % parts == p (the i loop below).  The batch mix of the official D128 cases is
+    // [1, 256, 128] tokens, i.e. one 1-token block, two 128-token blocks and one
+    // 128-token block, so part 0 collects the 1-token and the last batch's block while
+    // part 1 gets a single block: the busiest SPE runs 2.5x the mean (measured tile
+    // weights 2576 vs the balanced 2048, -20.5%; case_1 2704 vs 2048, -24.3%).
+    //
+    // Fix: enumerate every (batch, Q block) pair once at entry, weight it by
+    //   W = ntiles * cur_BM   (ntiles is the causal KV-tile trip count of the loop
+    //   below, cur_BM the rows the score/PV GEMM really walks), and hand the blocks
+    //   to the parts longest-first / least-loaded-first (LPT).  The Q blocks are
+    //   independent - each keeps its own online-softmax state and writes disjoint
+    //   output rows - so this changes only which SPE runs which block; the arithmetic
+    //   and the device output are bit-identical.  The assignment is fixed once per
+    //   kernel call and read back as a per-batch index list: no branch is added to the
+    //   per-KV-tile loops.
+    // ---------------------------------------------------------------------------
+    int nblk_total = 0;
+    for (int b = 0; b < args.batch_size; b++) {
+        int qe = args.q_seq_lens[b];
+        if constexpr (BM == 32) {
+            qe -= qe % BM;
+        }
+        nblk_total += (qe + BM - 1) / BM;
+    }
+    int nel = 4 * nblk_total + args.batch_size + 1;
+    if (nel < 1) nel = 1;
+    int *wl = (int *)rt_spm_malloc((size_t)nel * sizeof(int));
+    int *j_b = wl;                       // [nblk_total] owning batch of each job
+    int *j_i = j_b + nblk_total;         // [nblk_total] owning block start i
+    int *j_w = j_i + nblk_total;         // [nblk_total] weight (consumed by the LPT)
+    int *j_own = j_w + nblk_total;       // [nblk_total] assigned part
+    int *wl_off = j_own + nblk_total;    // [batch_size + 1] this worker's list prefix
+    for (int b = 0; b <= args.batch_size; b++) {
+        wl_off[b] = 0;
+    }
+    if (nblk_total > 0) {
+        {
+            int g = 0;
+            for (int b = 0; b < args.batch_size; b++) {
+                const int ql = args.q_seq_lens[b], kl = args.kv_seq_lens[b];
+                int qe = ql;
+                if constexpr (BM == 32) {
+                    qe -= qe % BM;
+                }
+                int cs = kl - ql;
+                if (cs < 0) cs = 0;
+                for (int i = 0; i < qe; i += BM, g++) {
+                    const int cb = MIN(BM, ql - i);
+                    int e = cs + i + cb;
+                    if (e > kl) e = kl;
+                    j_b[g] = b;
+                    j_i[g] = i;
+                    j_w[g] = ((e + BN - 1) / BN) * cb;
+                }
+            }
+            long load[4] = {0, 0, 0, 0};     // parts <= 2 today; keep the loop general
+            for (int k = 0; k < nblk_total; k++) {
+                int best = -1;
+                for (int j = 0; j < nblk_total; j++) {
+                    if (j_w[j] >= 0 && (best < 0 || j_w[j] > j_w[best])) best = j;
+                }
+                int p = 0;
+                for (int q = 1; q < parts; q++) {
+                    if (load[q] < load[p]) p = q;
+                }
+                load[p] += j_w[best];
+                j_own[best] = p;
+                j_w[best] = -1;
+            }
+            // Compact this worker's blocks, batch-major.  Write index never passes the read
+            // index (the enumeration above is already batch-major), so in-place is safe.
+            int nn = 0;
+            for (int b = 0; b < args.batch_size; b++) {
+                wl_off[b] = nn;
+                for (int j = 0; j < nblk_total; j++) {
+                    if (j_own[j] == part && j_b[j] == b) {
+                        j_b[nn] = j_b[j];
+                        j_i[nn] = j_i[j];
+                        nn++;
+                    }
+                }
+            }
+            wl_off[args.batch_size] = nn;
+        }
+    }
+    int cur_q_index = 0;
+    for (int b = 0; b < args.batch_size; b++) {
+        int q_seq_len = args.q_seq_lens[b], k_seq_len = args.kv_seq_lens[b];
+        // D512 (BM == 32) only: queries that do not fill a whole BM block are handled by the
+        // transposed-score tail phase below.  This bound is the only place that decides it: a
+        // data-driven trip count, no branch and no implementation switch.
+        int q_full_end = q_seq_len;
+        if constexpr (BM == 32) {
+            q_full_end = q_seq_len - (q_seq_len % BM);
+        }
+        memcpy(ldm_block_table, args.block_table + b * args.block_table_dim,
+               args.block_table_dim * sizeof(int));
+        // c38 cand-1: walk this worker's blocks from the entry-time list instead of the
+        // per-batch stride part*BM, part*BM + parts*BM, ... .  q_full_end is enforced when
+        // the list is built (the BM == 32 tail rows stay with the tail phase below).
+        (void)q_full_end;
+        for (int wi = wl_off[b]; wi < wl_off[b + 1]; wi++) {
+            const int i = j_i[wi];
+            int cur_BM_q = MIN(BM, q_seq_len - i);
+
+            // init online softmax state for this Q block
+            for (int idx = 0; idx < BM * BK; idx++) {
+                o_accum[idx] = 0.0f;
+            }
+            for (int row = 0; row < BM; row++) {
+                l_prev[row] = 0.0f;
+            }
+            fill_inf(m_prev, BM);
+            float *l_ptr = l_prev, *l_next = l_cur;
+            float *m_ptr = m_prev, *m_next = m_cur;
+
+            // load q [cur_BM, size_per_head]
+            int cur_BM = MIN(BM, q_seq_len - i);
+            half * src_q_ptr = (half *)args.q +
+                               (cur_q_index + i) * (args.local_head_num * args.size_per_head) +
+                               head * args.size_per_head;
+            size_t q_src_stride = (args.local_head_num - 1) * token_size;
+            memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
+
+            // clear unused rows of qbuf (cur_BM < BM)
+            if (cur_BM < BM) {
+                for (int r = cur_BM * args.size_per_head; r < BM * args.size_per_head; r++) {
+                    qbuf[r] = 0;
+                }
+            }
+
+            // NT form (BM == 32/64/128): build the transposed query block Q^T once per Q block so
+            // the per-KV-tile K staging transpose below disappears - the matmul takes A = ktmp
+            // directly and B = Q^T, and the score tile comes out transposed.  kbuf is free here
+            // (the K transpose it used to hold is skipped on these paths) and the PV staging
+            // moves to ktmp, which the NT GEMM has already consumed.  Q^T is held as 32-column
+            // panels, Q^T[:, 32*pb : 32*pb+32] contiguous with panel stride BK*32, because one
+            // teco-hal B operand is exactly one [BK, 32] panel; h-outer keeps the destination a
+            // contiguous vector store, the same shape the K staging transpose uses.
+            if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                for (int h = 0; h < BK; h++) {
+                    int r = 0;
+                    for (; r + 16 <= cur_BM; r += 16) {
+                        halfv16 v;
+                        half *vp = (half *)&v;
+                        for (int u = 0; u < 16; u++) {
+                            vp[u] = qbuf[(r + u) * BK + h];
+                        }
+                        simd_store(v, kbuf + (r >> 5) * (BK * 32) + h * 32 + (r & 31));
+                    }
+                    for (; r < cur_BM; r++) {
+                        kbuf[(r >> 5) * (BK * 32) + h * 32 + (r & 31)] = qbuf[r * BK + h];
+                    }
+                }
+            }
+            if constexpr (BM == 64) {
+                // BM == 64 has no tail phase, so a Q block whose cur_BM < BM leaves rows
+                // [cur_BM, BM) of outc untouched by the NT path; zero them once per Q block so
+                // the (never read back) discarded rows cannot hold stale/NaN SPM.
+                floatv16 zv = 0.0f;
+                for (int idx = 0; idx < BM * BN; idx += 16) {
+                    simd_store(zv, outc + idx);
+                }
+            }
+    
+            // Causal KV-tile bound.  The causal mask below is applied unconditionally and a
+            // tile whose whole column range is masked out contributes exp(-inf) = 0 to l and 0
+            // to o while leaving m unchanged, so the online-softmax state after it is
+            // bit-identical to the state before it.  Stopping the scan at the first such tile
+            // (same q_start expression as apply_causal_mask) therefore visits exactly the tiles
+            // that can contribute and leaves every device output bit identical.
+            int causal_q_start = k_seq_len - q_seq_len;
+            if (causal_q_start < 0) causal_q_start = 0;
+            int kv_tile_end = causal_q_start + i + cur_BM;
+            if (kv_tile_end > k_seq_len) kv_tile_end = k_seq_len;
+            MemcpyHandle kh[2];
+            int tile_step = 0;
+            int kv_head_idx = head / num_kv_groups;
+            if (0 < kv_tile_end) {
+                int cur_BN0 = MIN(BN, k_seq_len - 0);
+                int cur_block0 = 0 / args.block_size;
+                load_kv_cache_async(ktmp0, (const half *)args.key_cache, ldm_block_table, cur_block0,
+                                    kv_head_idx, args.local_kv_head_num, args.block_size,
+                                    args.size_per_head, cur_BN0, kh[0]);
+            }
+            for (int j = 0; j < kv_tile_end; j += BN, tile_step++) {
+                int cur_BN = MIN(BN, k_seq_len - j);
+                int cur_block = j / args.block_size;
+                half *ktmp_cur = ((tile_step & 1) == 0) ? ktmp0 : ktmp1;
+                half *ktmp_nxt = ((tile_step & 1) == 0) ? ktmp1 : ktmp0;
+                memcpy_wait(kh[tile_step & 1]);
+
+                int j_next = j + BN;
+                if (j_next < kv_tile_end) {
+                    int cur_BN_nxt = MIN(BN, k_seq_len - j_next);
+                    int cur_block_nxt = j_next / args.block_size;
+                    load_kv_cache_async(ktmp_nxt, (const half *)args.key_cache, ldm_block_table, cur_block_nxt,
+                                        kv_head_idx, args.local_kv_head_num, args.block_size,
+                                        args.size_per_head, cur_BN_nxt, kh[(tile_step + 1) & 1]);
+                }
+
+                // ---------------------------------------------------------------
+                // BM == 128 (the D128 instantiations - 8 of the 11 official cases, and
+                // the four 1.14 ms cases): NT-form score GEMM plus a transposed-domain
+                // scale / causal-mask / online-softmax.
+                //
+                // A = the K tile exactly as it leaves the paged cache ([cur_BN, BK],
+                // contiguous - so the per-KV-tile K staging transpose disappears), B = one
+                // 32-query Q^T panel built once per Q block, C = the transposed score panel
+                // S^T [cur_BN, 32].  Because the tile arrives transposed, the scale, mask
+                // and softmax run directly in that domain: the reduction over the KV index
+                // becomes a lane-wise vector accumulation with one query per lane, and each
+                // query's additions over t keep exactly the order of the untransposed
+                // scalar chain, so the online-softmax state stays bit-identical.  Only the
+                // P^T -> P half flip (fused with the old Step C) is left.
+                //
+                // A teco-hal M128_N32 C store lays down its full 128x32 float tile (16 KB)
+                // no matter how many rows of A carry data; the BM == 32/64 instantiations
+                // could hide that inside obuf (BM*BK halves >= 16 KB per live panel), but
+                // four panels would need 64 KB here.  Each panel is therefore pushed through
+                // the whole pipeline inside a 16 KB scratch that qbuf can provide: the Q^T
+                // build above already consumed qbuf and the next Q block reloads it.  The
+                // panels are 32 independent queries, so handling them one at a time leaves
+                // the online-softmax state unchanged.
+                // ---------------------------------------------------------------
+                if constexpr (BM == 128) {
+                    float *cst = (float *)qbuf;          // [128, 32] float panel scratch
+                    const int npb = (cur_BM + 31) >> 5;  // live 32-query panels
+                    auto tA = make_tensor<2>((half *)ktmp_cur,
+                        {static_cast<size_t>(cur_BN), static_cast<size_t>(BK)});
+                    MatmulConfig matmul_cfg;
+                    Matmul matmul(matmul_cfg);
+                    for (int pb = 0; pb < npb; pb++) {
+                        const int r0 = pb << 5;
+                        auto tB = make_tensor<2>((half *)(kbuf + pb * (BK * 32)),
+                            {static_cast<size_t>(BK), static_cast<size_t>(32)});
+                        auto tST = make_tensor<2>((float *)cst,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(32)});
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                            tA, tB, /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tST);
+                        matmul.wait_storeC(1);
+
+                        // simd mul softmax_scale (a panel row is 32 contiguous queries)
+                        {
+                            floatv16 vscale = args.softmax_scale;
+                            int total = cur_BN * 32;
+                            for (int si = 0; si < total; si += 16) {
+                                floatv16 v;
+                                simd_load(v, cst + si);
+                                v = simd_mul(v, vscale);
+                                simd_store(v, cst + si);
+                            }
+                        }
+
+                        // causal mask, transposed: KV column t (= j + t) masks the queries
+                        // r <= min(t - off - 1, cur_BN - off - 2) with off = q_start + i - j,
+                        // which is exactly the element set apply_causal_mask() builds on
+                        // S[cur_BM, BN].
+                        const int off = ({ int qs = k_seq_len - q_seq_len; qs < 0 ? 0 : qs; }) + i - j;
+                        if (off < cur_BN) {
+                            int lim = cur_BN - off - 2;
+                            for (int t = 0; t < cur_BN; t++) {
+                                int rmax = t - off - 1;
+                                if (rmax > lim) rmax = lim;
+                                if (rmax > cur_BM - 1) rmax = cur_BM - 1;
+                                if (rmax < r0) continue;   // no masked query inside this panel
+                                int hi = (r0 + 31 < rmax) ? 31 : rmax - r0;
+                                fill_inf(cst + t * 32, hi + 1);
+                            }
+                        }
+
+                        // Step A: online softmax on the transposed panel (bit-identical state);
+                        // it also emits P into p_score, so no separate transpose loop follows.
+                        online_softmax_panel_T(cst, r0, cur_BM, cur_BN,
+                                               m_ptr, l_ptr, m_next, l_next, scale,
+                                               p_score, BN, off);
+
+                        // [c36-SOFTP] The live columns of P were already written by
+                        // online_softmax_panel_T; only the padded columns [cur_BN, BN) that
+                        // the P@V GEMM expects to be zero are left to write here.
+                        if (cur_BN < BN) {
+                            for (int rr = 0; rr < 32; rr++) {
+                                int r = r0 + rr;
+                                if (r >= cur_BM) break;
+                                half *op = p_score + r * BN;
+                                for (int t = cur_BN; t < BN; t++) op[t] = (half)0;
+                            }
+                        }
+                    }
+                } else {
+                // gemm: Q * K^T = score, using teco_hal matmul M2<=128, N2=32
+                {
+                    MatmulConfig matmul_cfg;
+                    Matmul matmul(matmul_cfg);
+                    if constexpr (BM == 32 || BM == 64) {
+                        // NT form: A = the K tile itself (contiguous [cur_BN, BK], no staging
+                        // transpose), B = the 32-column Q^T panels that carry a live query row
+                        // (built once per Q block); each C is one S^T panel [cur_BN, 32] and is
+                        // flipped back into S [cur_BM, BN].  One M128_N32 call per panel keeps
+                        // every operand in the layout this file already uses for BM == 32: the
+                        // B/C row stride is exactly N2 == 32.  MatmulBlockConfig::M64_N64 is
+                        // deliberately not used: its H-2 HAL form loads B from a panel-major
+                        // layout (second panel at element offset K*32) and ignores B strides, so
+                        // a plain row-major [BK, 64] view would be read wrongly.
+                        float *st = (float *)obuf;
+                        auto tA = make_tensor<2>((half *)ktmp_cur,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BK)});
+                        const int npb = (cur_BM + 31) >> 5;   // live 32-column panels: 1 or 2
+                        for (int pb = 0; pb < npb; pb++) {
+                            auto tB = make_tensor<2>((half *)(kbuf + pb * (BK * 32)),
+                                {static_cast<size_t>(BK), static_cast<size_t>(32)});
+                            auto tST = make_tensor<2>((float *)(st + pb * (cur_BN * 32)),
+                                {static_cast<size_t>(cur_BN), static_cast<size_t>(32)});
+                            matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                                tA, tB, /*is_lastk=*/true);
+                            matmul.storeC_spm_async(tST);
+                            matmul.wait_storeC(1);
+                        }
+                        for (int r = 0; r < cur_BM; r++) {
+                            const float *sp = st + (r >> 5) * (cur_BN * 32) + (r & 31);
+                            float *op = outc + r * BN;
+                            for (int t = 0; t < cur_BN; t++) {
+                                op[t] = sp[t * 32];
+                            }
+                        }
+                    } else {
+                        int gemm_m = BM;
+                        if constexpr (BM == 128 || BM == 64) {
+                            gemm_m = cur_BM;
+                        }
+                        auto tensorQ = make_tensor<2>((half *)qbuf,
+                            {static_cast<size_t>(gemm_m),
+                             static_cast<size_t>(args.size_per_head)});
+                        auto tensorK = make_tensor<2>((half *)kbuf,
+                            {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
+                        auto tensorC = make_tensor<2>((float *)outc,
+                            {static_cast<size_t>(gemm_m), static_cast<size_t>(BN)});
+
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                            tensorQ, tensorK, /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tensorC);
+                        matmul.wait_storeC(1);
+                    }
+                }
+
+                // simd mul softmax_scale
+                {
+                    floatv16 vscale = args.softmax_scale;
+                    int total = BM * BN;
+                    if constexpr (BM == 32 || BM == 128) {
+                        // D512/BM32: only the cur_BM observed query rows are ever read back
+                        // (Step A/B/E, normalize, output DMA are all cur_BM scoped).
+                        total = cur_BM * BN;
+                    }
+                    int si = 0;
+                    for (; si <= total - 16; si += 16) {
+                        floatv16 v;
+                        simd_load(v, outc + si);
+                        v = simd_mul(v, vscale);
+                        simd_store(v, outc + si);
+                    }
+                    for (; si < total; si++) {
+                        outc[si] *= args.softmax_scale;
+                    }
+                }
+
+                // causal mask inplace
+                apply_causal_mask(outc, cur_BM, cur_BN, i, j, q_seq_len, k_seq_len, BM, BN);
+
+                // Step A: online softmax
+                online_softmax_step(outc,
+                                    m_ptr, l_ptr,
+                                    m_next, l_next,
+                                    scale,
+                                    cur_BM, cur_BN, BN);
+                }
+
+                // Step B: fused into Step E (o_accum scaled in registers alongside outO addition)
+                if constexpr (BM != 128) {
+                // Step C: float->half: outc -> p_score (独立buffer, 非ktmp, 避免head_size=64越界)
+                {
+                    int total = BM * BN;
+                    if constexpr (BM == 32 || BM == 128) {
+                        // D512/BM32: rows >= cur_BM only feed P@V rows that are discarded.
+                        total = cur_BM * BN;
+                    }
+                    int si = 0;
+                    for (; si + 16 <= total; si += 16) {
+                        floatv16 vf;
+                        halfv16 vh;
+                        simd_load(vf, outc + si);
+                        vh = (halfv16)vf;
+                        simd_store(vh, p_score + si);
+                    }
+                    for (; si < total; si++) {
+                        p_score[si] = (half)outc[si];
+                    }
+                }
+
+                // last turn clean p_score
+                for (int ri = 0; ri < cur_BM; ri++) {
+                    for (int cj = cur_BN; cj < BN; cj++) {
+                        p_score[ri * BN + cj] = 0;
+                    }
+                }
+                }
+
+                // Step D: load V, gemm p_score @ V
+                // KV cache shape: [max_block_num, kv_head_num, block_size, head_size]
+                int block_id = ldm_block_table[cur_block];
+                const half *v_cache_base = (const half *)args.value_cache
+                    + block_id * args.local_kv_head_num * args.block_size * args.size_per_head
+                    + kv_head_idx  * args.block_size * args.size_per_head;
+
+                half * vbuf = kbuf;
+                if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                    vbuf = ktmp_cur;
+                }
+                float * outO = outc;            // reuse outc
+                int gemm_bn = 32;
+                // V-A: the per-panel strided V pack is issued one panel ahead on a MemcpyHandle
+                // and overlapped with the previous panel's PV GEMM.  The two panes live inside
+                // the same BN*BK-half staging buffer the synchronous code reuses panel by panel
+                // (BK/gemm_bn * BN*gemm_bn*2 B == BN*BK*2 B), so the SPM footprint does not
+                // change.  A pane is rewritten one iteration after its last reader, i.e. only
+                // after that iteration's wait_storeC(1) has retired the GEMM which consumed it
+                // (a C store cannot complete before the operands it consumed are in), so there
+                // is no read/write hazard.  The look-ahead of the last panel is clamped to a
+                // valid panel index - a redundant but well-formed DMA - instead of a zero-length
+                // one, and its handle is retired after the loop before ktmp is handed back to
+                // the K staging.  The loop body therefore stays branch-free (data-driven trip
+                // counts only) and the staged bytes are exactly those of the synchronous pack,
+                // so the panel payload the GEMM sees is bit-identical.
+                half *vbuf2 = vbuf + BN * gemm_bn;
+                const int npanel = BK / gemm_bn;
+                MemcpyHandle vh[2];
+                memcpy_async(vbuf, v_cache_base, cur_BN * gemm_bn * sizeof(half),
+                             gemm_bn * sizeof(half),
+                             {0, (args.size_per_head - gemm_bn) * sizeof(half)},
+                             MemcpyGlobalToSpm, vh[0]);
+                for (int hb = 0; hb < npanel; hb++) {
+                    half *pane = ((hb & 1) == 0) ? vbuf : vbuf2;
+                    half *nxt = ((hb & 1) == 0) ? vbuf2 : vbuf;
+                    memcpy_wait(vh[hb & 1]);
+                    // look one panel ahead; the clamp makes the last issue a redundant reload
+                    // of the last panel (valid DMA, no zero-length descriptor)
+                    {
+                        int hbn = MIN(hb + 1, npanel - 1);
+                        memcpy_async(nxt, v_cache_base + hbn * gemm_bn,
+                                     cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
+                                     {0, (args.size_per_head - gemm_bn) * sizeof(half)},
+                                     MemcpyGlobalToSpm, vh[(hb + 1) & 1]);
+                    }
+
+                    // clear unused rows of the consumed pane (cur_BN < BN); zero trip count
+                    // when cur_BN == BN
+                    for (int r = cur_BN * gemm_bn; r < BN * gemm_bn; r++) {
+                        pane[r] = 0;
+                    }
+
+                    MatmulConfig cfg;
+                    Matmul matmul(cfg);
+                    int gemm_m2 = BM;
+                    if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                        gemm_m2 = cur_BM;
+                    }
+                    auto tP = make_tensor<2>(p_score, {(size_t)gemm_m2, (size_t)BN});
+                    auto tV = make_tensor<2>(pane, {(size_t)BN, (size_t)gemm_bn});
+                    auto tO = make_tensor<2>((float *)outO, {(size_t)gemm_m2, (size_t)gemm_bn});
+                    matmul.compute_async<MatmulBlockConfig::M128_N32>(tP, tV, true);
+                    matmul.storeC_spm_async(tO);
+                    matmul.wait_storeC(1);
+
+                    // Step E: fused o_accum update with online rescale
+                    for (int ai = 0; ai < cur_BM; ai++) {
+                        if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                            float *dst = o_accum + ai * BK + hb * gemm_bn;
+                            float *src = outO + ai * gemm_bn;
+                            floatv16 vscale = scale[ai];
+                            for (int ak = 0; ak < 32; ak += 16) {
+                                floatv16 contribution;
+                                simd_load(contribution, src + ak);
+                                if (j == 0) {
+                                    simd_store(contribution, dst + ak);
+                                } else {
+                                    floatv16 previous;
+                                    simd_load(previous, dst + ak);
+                                    previous = previous * vscale;
+                                    previous = previous + contribution;
+                                    simd_store(previous, dst + ak);
+                                }
+                            }
+                        } else {
+                            for (int ak = 0; ak < gemm_bn; ak++) {
+                                if (j == 0) {
+                                    o_accum[ai * BK + hb * gemm_bn + ak] = outO[ai * gemm_bn + ak];
+                                } else {
+                                    o_accum[ai * BK + hb * gemm_bn + ak] = o_accum[ai * BK + hb * gemm_bn + ak] * scale[ai] + outO[ai * gemm_bn + ak];
+                                }
+                            }
+                        }
+                    }
+                }
+                memcpy_wait(vh[npanel & 1]);
+
+                // swap pointer
+                float *tmp = l_ptr; l_ptr = l_next; l_next = tmp;
+                tmp = m_ptr; m_ptr = m_next; m_next = tmp;
+
+            }
+
+            // normalize O_accum by l and convert to half
+            for (int row = 0; row < cur_BM_q; row++) {
+                // float l_inv = l_ptr[row] > 0.0f ? 1.0f / l_ptr[row] : 0.0f;
+                float l_inv = 1.0f / l_ptr[row];
+                floatv16 vl_inv = l_inv;
+                float *o_row = o_accum + row * args.size_per_head;
+                half *obuf_row = obuf + row * args.size_per_head;
+                int k = 0;
+                for (; k <= args.size_per_head - 16; k += 16) {
+                    floatv16 vf;
+                    halfv16 vh;
+                    simd_load(vf, o_row + k);
+                    vf = vf * vl_inv;
+                    vh = (halfv16)vf;
+                    simd_store(vh, obuf_row + k);
+                }
+                for (; k < args.size_per_head; k++) {
+                    obuf_row[k] = (half)(o_row[k] * l_inv);
+                }
+            }
+
+            // dma O
+            int rel_obuf_size = MIN(BM, q_seq_len - i) * token_size;
+            size_t o_dst_stride = (args.local_head_num - 1) * token_size;
+            half *out_base = (half *)args.fmha_out +
+                             (cur_q_index + i) * args.local_head_num * args.size_per_head +
+                             head * args.size_per_head;
+            memcpy_stride(out_base, obuf, rel_obuf_size, token_size, {o_dst_stride, 0});
+        }
+
+        // D512 tail phase (BM == 32): the queries left over after the full BM blocks are scored
+        // by the SAME matmul, but with K as the A operand and a transposed query block as B
+        // (S^T = K * Q^T).  The per-KV-tile K staging transpose therefore disappears: the query
+        // block is transposed once per tail block (instead of K once per KV tile) and the scores
+        // are transposed back (tq * cur_BN elements), after which scale / causal mask /
+        // online softmax / Step C / V staging / P@V / Step E / normalize are the same code and
+        // the same arithmetic as the full-block path above.  Entered purely by the data-driven
+        // loop bound above (zero iterations when q_seq_len % BM == 0).
+        if constexpr (BM == 32) {
+            int tq = q_seq_len - q_full_end;
+            if (tq > 0) {
+                half *qt = qbuf;                        // [BK, BM] transposed query block
+                {
+                    floatv16 zf = 0.0f;
+                    halfv16 zh = (halfv16)zf;
+                    for (int idx = 0; idx < BK * BM; idx += 16) {
+                        simd_store(zh, qt + idx);
+                    }
+                    // Stage the tail query rows with one strided DMA - the same primitive the
+                    // full-block path above uses - instead of scalar global loads (a scalar
+                    // 2-byte global load costs ~150 cycles here and dominated the phase), then
+                    // transpose SPM -> SPM.
+                    half *qstage = kbuf;
+                    const half *src_q_ptr = (const half *)args.q +
+                        (cur_q_index + q_full_end) *
+                            (args.local_head_num * args.size_per_head) +
+                        tid * args.size_per_head;
+                    size_t q_src_stride = (args.local_head_num - 1) * token_size;
+                    memcpy_stride(qstage, src_q_ptr, tq * token_size, token_size,
+                                  {0, q_src_stride});
+                    for (int r = 0; r < tq; r++) {
+                        const half *row = qstage + r * args.size_per_head;
+                        for (int h = 0; h < BK; h++) {
+                            qt[h * BM + r] = row[h];
+                        }
+                    }
+                }
+                for (int idx = 0; idx < tq * BK; idx++) {
+                    o_accum[idx] = 0.0f;
+                }
+                for (int row = 0; row < tq; row++) {
+                    l_prev[row] = 0.0f;
+                }
+                fill_inf(m_prev, tq);
+                float *l_ptr = l_prev, *l_next = l_cur;
+                float *m_ptr = m_prev, *m_next = m_cur;
+
+                for (int j = 0; j < k_seq_len; j += BN) {
+                    int cur_BN = MIN(BN, k_seq_len - j);
+                    int kv_head_idx = tid / num_kv_groups;
+                    int cur_block = j / args.block_size;
+                    load_kv_cache(ktmp, (const half *)args.key_cache, ldm_block_table, cur_block,
+                                  kv_head_idx, args.local_kv_head_num, args.block_size,
+                                  args.size_per_head, cur_BN);
+
+                    // S^T = K * Q^T: A = ktmp (contiguous [cur_BN, BK], no transpose at all),
+                    // B = qt ([BK, BM], row stride BM == 32, exactly what the HAL assumes).
+                    float *st = (float *)obuf;          // [cur_BN, BM] score^T scratch
+                    {
+                        MatmulConfig cfg;
+                        Matmul matmul(cfg);
+                        auto tK = make_tensor<2>((half *)ktmp,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BK)});
+                        auto tQt = make_tensor<2>((half *)qt,
+                            {static_cast<size_t>(BK), static_cast<size_t>(BM)});
+                        auto tST = make_tensor<2>((float *)st,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BM)});
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(tK, tQt,
+                                                                          /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tST);
+                        matmul.wait_storeC(1);
+                    }
+
+                    // S^T [cur_BN, BM] -> S [tq, cur_BN] (only the live query columns)
+                    for (int t = 0; t < cur_BN; t++) {
+                        for (int r = 0; r < tq; r++) {
+                            outc[r * BN + t] = st[t * BM + r];
+                        }
+                    }
+
+                    // simd mul softmax_scale
+                    {
+                        floatv16 vscale = args.softmax_scale;
+                        int total = tq * BN;
+                        int si = 0;
+                        for (; si <= total - 16; si += 16) {
+                            floatv16 v;
+                            simd_load(v, outc + si);
+                            v = simd_mul(v, vscale);
+                            simd_store(v, outc + si);
+                        }
+                        for (; si < total; si++) {
+                            outc[si] *= args.softmax_scale;
+                        }
+                    }
+
+                    // causal mask inplace
+                    apply_causal_mask(outc, tq, cur_BN, q_full_end, j, q_seq_len, k_seq_len,
+                                      BM, BN);
+
+                    // Step A: online softmax
+                    online_softmax_step(outc, m_ptr, l_ptr, m_next, l_next, scale, tq, cur_BN,
+                                        BN);
+
+                    // Step B: o_accum: O *= exp(m_old - m_new)
+                    for (int ri = 0; ri < tq; ri++) {
+                        float s = scale[ri];
+                        floatv16 vscale = s;
+                        float *row = o_accum + ri * BK;
+                        for (int rk = 0; rk < BK; rk += 16) {
+                            floatv16 v;
+                            simd_load(v, row + rk);
+                            simd_store(simd_mul(v, vscale), row + rk);
+                        }
+                    }
+
+                    // Step C: float->half: outc -> p_score
+                    {
+                        int total = tq * BN;
+                        int si = 0;
+                        for (; si <= total - 16; si += 16) {
+                            floatv16 vf;
+                            halfv16 vh;
+                            simd_load(vf, outc + si);
+                            vh = (halfv16)vf;
+                            simd_store(vh, p_score + si);
+                        }
+                        for (; si < total; si++) {
+                            p_score[si] = (half)outc[si];
+                        }
+                    }
+
+                    // last turn clean p_score
+                    for (int ri = 0; ri < tq; ri++) {
+                        for (int cj = cur_BN; cj < BN; cj++) {
+                            p_score[ri * BN + cj] = 0;
+                        }
+                    }
+
+                    // Step D: load V, gemm p_score @ V
+                    int block_id = ldm_block_table[cur_block];
+                    const half *v_cache_base = (const half *)args.value_cache
+                        + block_id * args.local_kv_head_num * args.block_size *
+                              args.size_per_head
+                        + kv_head_idx * args.block_size * args.size_per_head;
+                    half *vbuf = kbuf;
+                    float *outO = outc;
+                    int gemm_bn = 32;
+                    for (int hb = 0; hb < BK / gemm_bn; hb++) {
+                        memcpy_stride(vbuf, v_cache_base + hb * gemm_bn,
+                                      cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
+                                      {0, (args.size_per_head - gemm_bn) * sizeof(half)});
+                        if (cur_BN < BN) {
+                            for (int r = cur_BN * gemm_bn; r < BN * gemm_bn; r++) {
+                                vbuf[r] = 0;
+                            }
+                        }
+                        MatmulConfig cfg;
+                        Matmul matmul(cfg);
+                        auto tP = make_tensor<2>(p_score, {(size_t)tq, (size_t)BN});
+                        auto tV = make_tensor<2>(vbuf, {(size_t)BN, (size_t)gemm_bn});
+                        auto tO = make_tensor<2>((float *)outO, {(size_t)tq, (size_t)gemm_bn});
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(tP, tV, true);
+                        matmul.storeC_spm_async(tO);
+                        matmul.wait_storeC(1);
+
+                        // Step E: o_accum[i][hb*32 + k] += outO[i][k]
+                        for (int ai = 0; ai < tq; ai++) {
+                            float *dst = o_accum + ai * BK + hb * gemm_bn;
+                            float *src = outO + ai * gemm_bn;
+                            for (int ak = 0; ak < 32; ak += 16) {
+                                floatv16 previous, contribution;
+                                simd_load(previous, dst + ak);
+                                simd_load(contribution, src + ak);
+                                simd_store(previous + contribution, dst + ak);
+                            }
+                        }
+                    }
+
+                    float *tmp = l_ptr; l_ptr = l_next; l_next = tmp;
+                    tmp = m_ptr; m_ptr = m_next; m_next = tmp;
+                }
+
+                // normalize the tail rows by l and convert to half
+                for (int row = 0; row < tq; row++) {
+                    float l_inv = 1.0f / l_ptr[row];
+                    floatv16 vl_inv = l_inv;
+                    float *o_row = o_accum + row * args.size_per_head;
+                    half *obuf_row = obuf + row * args.size_per_head;
+                    int k = 0;
+                    for (; k <= args.size_per_head - 16; k += 16) {
+                        floatv16 vf;
+                        halfv16 vh;
+                        simd_load(vf, o_row + k);
+                        vf = vf * vl_inv;
+                        vh = (halfv16)vf;
+                        simd_store(vh, obuf_row + k);
+                    }
+                    for (; k < args.size_per_head; k++) {
+                        obuf_row[k] = (half)(o_row[k] * l_inv);
+                    }
+                }
+
+                // dma the tail rows out
+                {
+                    int rel_obuf_size = tq * token_size;
+                    size_t o_dst_stride = (args.local_head_num - 1) * token_size;
+                    half *out_base = (half *)args.fmha_out +
+                        (cur_q_index + q_full_end) * args.local_head_num *
+                            args.size_per_head +
+                        tid * args.size_per_head;
+                    memcpy_stride(out_base, obuf, rel_obuf_size, token_size, {o_dst_stride, 0});
+                }
+            }
+        }
+        cur_q_index += q_seq_len;
+    }
+}
+
+__global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
+    flash_attention_half<128>(args);
+}
+
+

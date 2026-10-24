@@ -54,6 +54,9 @@ void FlashAttentionExecutor::paramParse() {
     // Read proto scalar params
     auto fa_param = parser_->getProtoNode()->tecokernel_param().flash_attention_param();
 
+    max_prefill_len_ = fa_param.max_seqlen_q();
+    max_decode_len_ = fa_param.max_seqlen_k();
+
     // Read q/kv seq_lens from tensor inputs (prev_value)
     batch_size_ = parser_->input(4)->shape[0];
     q_seq_lens_.resize(batch_size_);
@@ -90,6 +93,9 @@ void FlashAttentionExecutor::paramGeneration() {
 
 void FlashAttentionExecutor::compute() {
 #ifdef USE_TECO
+    // The explicit softmax scale has its own atomic change; this branch keeps
+    // the upstream default 1/sqrt(head_size) entry so the tile work does not
+    // define or depend on the scale C ABI.
     checkTECOOPS(tecoopsFlashAttention(handle_,
         max_prefill_len_, max_decode_len_, max_block_num_,
         static_cast<const int*>(dev_input[4]),

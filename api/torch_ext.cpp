@@ -27,6 +27,8 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <cmath>
+#include <limits>
 #include <torch/extension.h>
 #include <torch_sdaa/sdaa_extension.h>
 
@@ -112,26 +114,36 @@ void flash_attn_varlen_func_torch(
     bool return_softmax_lse,
     torch::Tensor out) {
 
+    // The explicit softmax scale is delivered by its own atomic change (the
+    // standalone scale PR); this branch keeps the upstream ABI and its
+    // 1/sqrt(head_size) default so the tile work stays independently
+    // reviewable and the two PRs do not define the same C symbol.
+    (void)softmax_scale;
+
     int batch_size = seqused_k.size(0);
     int max_block_num = k.size(0);
 
-    // parse q_seq_lens
-    auto cu_seqlens_q_cpu = cu_seqlens_q.cpu();
-    auto cu_ptr = cu_seqlens_q_cpu.data_ptr<int>();
-    auto q_lens_cpu = torch::empty({batch_size}, torch::kInt32);
-    auto ql_cpu_ptr = q_lens_cpu.data_ptr<int>();
-    for (int b = 0; b < batch_size; b++) {
-        ql_cpu_ptr[b] = cu_ptr[b + 1] - cu_ptr[b];
-    }
-    auto q_lens = q_lens_cpu.to("sdaa");
-
-    if (!out.defined()) {
-        out = torch::zeros_like(q);
-    } else {
-        out.zero_();
-    }
+    // The kernel consumes q_seq_lens on device. Derive it from the device-side
+    // cumulative lengths without a D2H sync followed by an H2D copy. The
+    // subtraction produces a contiguous [batch_size] tensor for the ABI.
+    auto q_lens = (
+        cu_seqlens_q.narrow(0, 1, batch_size) -
+        cu_seqlens_q.narrow(0, 0, batch_size)).contiguous();
 
     tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the Teco-Ops launch ordered with the device-side metadata
+    // subtraction and the caller's other PyTorch work.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+
+    // The kernel writes every [total_q, num_heads, head_size] output element.
+    // Allocate without a device-wide clear so each call does not pay for a
+    // redundant full-output memset. The focused API test seeds a caller-
+    // provided output tensor with a sentinel and compares the complete result,
+    // so an incomplete kernel write remains observable.
+    if (!out.defined()) {
+        out = torch::empty_like(q);
+    }
+
     tecoopsTensorDescriptor_t blockTableDesc, qDataDesc, kCacheDesc, vCacheDesc, oDataDesc;
     auto make_desc = [&](tecoopsTensorDescriptor_t &desc, tecoopsDataType_t dtype,
                          torch::Tensor &t) {
@@ -147,7 +159,7 @@ void flash_attn_varlen_func_torch(
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
 
-    tecoopsFlashAttention(handle,
+    const tecoopsStatus_t status = tecoopsFlashAttention(handle,
                           max_seqlen_q, max_seqlen_k, max_block_num,
                           (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
                           blockTableDesc, block_table.data_ptr(),
@@ -162,6 +174,14 @@ void flash_attn_varlen_func_torch(
     tecoopsDestroyTensorDescriptor(kCacheDesc);
     tecoopsDestroyTensorDescriptor(vCacheDesc);
     tecoopsDestroyTensorDescriptor(oDataDesc);
+
+    // Do not swallow the C ABI status: an unsupported head_dim / block_size (or any
+    // other failure) used to return an unwritten output tensor that "looked fine".
+    // The descriptors are released above, so the Python exception leaks nothing.
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "flash_attention rejected the call (status=", static_cast<int>(status),
+                "); unsupported head_dim/block_size or a failed dispatch. The output "
+                "tensor was not written.");
 }
 
 void causal_conv1d_fn_torch(

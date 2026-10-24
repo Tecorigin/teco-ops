@@ -151,6 +151,9 @@ def test_flash_attention(param_path, input_lists, reuse_lists, output_lists, dev
     params = read_prototxt(param_path)
     input_params = params["input"]
     output_params = params["output"]
+    if isinstance(output_params, list):
+        output_params = output_params[0]
+    fa_param = params["tecokernel_param"]["flash_attention_param"]
 
     # Read seq_lens from input tensors (input[4], input[5])
     q_seq_lens_t = to_tensor(input_lists[4], input_params[4], device=device)
@@ -177,7 +180,7 @@ def test_flash_attention(param_path, input_lists, reuse_lists, output_lists, dev
         q_seq_lens, kv_seq_lens,
         block_table,
         causal=True,
-        softmax_scale=1.0 / math.sqrt(float(q_data.shape[2])),
+        softmax_scale=float(fa_param.get("softmax_scale", 1.0 / math.sqrt(float(q_data.shape[2])))),
     )
 
     with open(output_lists[0], "wb") as f:

@@ -1,0 +1,142 @@
+op_name: "flash_attention"
+input {
+  id: "blockTable"
+  shape {
+    dims: 1
+    dims: 3
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  random_data {
+    seed: 100
+    lower_bound: 0
+    upper_bound: 2
+    distribution: UNIFORM
+  }
+}
+input {
+  id: "qData"
+  shape {
+    dims: 33
+    dims: 16
+    dims: 512
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data {
+    seed: 1
+    lower_bound: -1.0
+    upper_bound: 1.0
+    distribution: UNIFORM
+  }
+}
+input {
+  id: "kCache"
+  shape {
+    dims: 3
+    dims: 1
+    dims: 32
+    dims: 512
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data {
+    seed: 2
+    lower_bound: -1.0
+    upper_bound: 1.0
+    distribution: UNIFORM
+  }
+}
+input {
+  id: "vCache"
+  shape {
+    dims: 3
+    dims: 1
+    dims: 32
+    dims: 512
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data {
+    seed: 3
+    lower_bound: -1.0
+    upper_bound: 1.0
+    distribution: UNIFORM
+  }
+}
+input {
+  id: "q_seq_lens"
+  shape {
+    dims: 1
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value {
+    value_i: 33
+  }
+}
+input {
+  id: "kv_seq_lens"
+  shape {
+    dims: 1
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_INT32
+  ttype: TENSOR
+  prev_value {
+    value_i: 33
+  }
+}
+output {
+  id: "oData"
+  shape {
+    dims: 33
+    dims: 16
+    dims: 512
+  }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  reused: false
+}
+tecokernel_param {
+  flash_attention_param {
+    max_seqlen_q: 33
+    max_seqlen_k: 33
+  }
+}
+test_param: {
+    error_func: DIFF1
+    error_threshold: 1e-4
+}
+
+# BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+# reserved.
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# Redistributions of source code must retain the above copyright notice,
+# this list of conditions and the following disclaimer.
+# Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+# Neither the name of the copyright holder nor the names of its contributors
+# may be used to endorse or promote products derived from this software
+# without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+# STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+# WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+# OF SUCH DAMAGE.

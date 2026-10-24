@@ -124,7 +124,22 @@ __device__ void online_softmax_step(
         float m_new = MAX(pre_max[i], m_block);
         // m_new = MAX(m_new, 0.0f);
         cur_max[i] = m_new;
-        scale[i] = expf(pre_max[i] - m_new);
+    }
+    // Step 1b: scale = exp(m_old - m_new), 16 rows per SIMD op.  vexp() is the vendor
+    // 16-lane exp and the 16-lane subtract rounds exactly like the scalar one, so the
+    // rescale factor keeps the same fp32 value; only the transcendental leaves the
+    // scalar pipe.  The tail stays scalar (m is a runtime row count).
+    {
+        int sc_i = 0;
+        for (; sc_i <= m - 16; sc_i += 16) {
+            floatv16 vpm, vnm;
+            simd_load(vpm, pre_max + sc_i);
+            simd_load(vnm, cur_max + sc_i);
+            simd_store(vexp(simd_vfsubs(vpm, vnm)), scale + sc_i);
+        }
+        for (; sc_i < m; sc_i++) {
+            scale[sc_i] = expf(pre_max[sc_i] - cur_max[sc_i]);
+        }
     }
 
     // Step 2: inplace scores: S -> exp(S - m_new), cal l_new
@@ -152,21 +167,67 @@ __device__ void online_softmax_step(
     }
 }
 
-__global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
+template <int BM>
+__device__ __always_inline void flash_attention_half(FlashAttentionArgs args) {
     int tid = threadIdx;
-    if (tid >= MIN(args.spe_num, args.local_head_num)) {
+    // SPE work split (D128 / BM == 128, D256 / BM == 64): the Q blocks of one (batch, head)
+    // are fully independent - each keeps its own online-softmax scan and writes disjoint
+    // output rows - so when the SPE array is wider than the local head count they can be
+    // spread over several SPEs instead of leaving (spe_num - local_head_num) SPEs idle.
+    // D256 (case_6: 16 heads on a 32-SPE array) shows the same waste as D128: with parts == 1
+    // half of the array returns at the guard below, and the two Q blocks of every head are
+    // serialised on one SPE.  parts == 1 reproduces the previous mapping exactly.
+    // Data-driven trip count bound once at entry from the launch shape: no branch inside the
+    // per-tile loops, no implementation switch.
+    // Query-unit granularity.  For BM == 64 (D256/ALGO1) a whole Q block is two 32-row query
+    // units, and one 32-row unit is exactly one NT panel (npb == 1, kbuf panel 0), so the
+    // score/PV arithmetic of a unit is a subset of a block's: scheduling units instead of whole
+    // blocks (a) tightens the causal KV-tile bound - rows 0..31 of a 64-row block never need the
+    // second KV tile - and (b) lets the two parts share the heavy block instead of serialising it
+    // on one SPE (case_6: 128 row-tiles on one part vs 3 on the other).  UQ is a compile-time
+    // constant per instantiation and no branch is added to any loop.  Every row-scoped quantity
+    // below (cur_BM_q, cur_BM, the output DMA row count) is expressed in UQ for that reason.
+    constexpr int UQ = (BM == 64) ? (BM / 2) : BM;
+    // The NT-form staging below walks Q^T in 16-lane vectors and steps the Q block by
+    // `parts * UQ`, so the Q-block stride must stay a multiple of the 16-wide SIMD width.
+    // UQ is the only compile-time knob here; BK (head_dim) and BN (== block_size) are
+    // runtime values, so their preconditions (BK % 16 == 0, BN == 32) are bound once at
+    // dispatch in find_flash_attention.cpp instead of being branched on in this loop nest.
+    static_assert(UQ % 16 == 0,
+                  "flash_attention BM32/64 Q-block stride must be a multiple of 16");
+    int parts = 1;
+    if constexpr (BM == 128 || BM == 64) {
+        parts = MAX(1, MIN(2, args.spe_num / args.local_head_num));
+    }
+    if (tid >= MIN(args.spe_num, args.local_head_num * parts)) {
         return;
+    }
+    // Partition mapping via head == tid % local_head_num, BM == 128/64 only (parts is capped
+    // at 2 there, so part == tid / local_head_num is 0 or 1).  With parts == 1 the guard
+    // above has already rejected every tid >= local_head_num, so this is exactly the previous
+    // head == tid / part == 0 mapping.
+    int head = tid;
+    int part = 0;
+    if constexpr (BM == 128 || BM == 64) {
+        const int h = args.local_head_num;
+        part = tid / h;
+        head = tid - part * h;
     }
     int num_kv_groups = args.local_head_num / args.local_kv_head_num;
 
-    int BM = 128;   // M block, 128 for ace
     int BN = 32;    // N block, 32 for ace; block_size
     int BK = args.size_per_head;   // head_dim
     int token_size = args.size_per_head * sizeof(half);
     int * ldm_block_table = (int*)rt_spm_malloc(args.block_table_dim * sizeof(int));
     half * qbuf = (half*)rt_spm_malloc(BM * token_size);            // BM * BK
     half * ktmp = (half*)rt_spm_malloc(BN * token_size);            // BN * BK
-    half * kbuf = (half*)rt_spm_malloc(BN * token_size);            // BK * BN
+    // kbuf carries the staged K^T [BK, BN] on the BM == 128 path, and the transposed
+    // query block Q^T [BK, BM] on the BM == 32/64 NT-form paths (see below).
+    int kbuf_n = BN * BK;
+    if constexpr (BM != 128) {
+        kbuf_n = BM * BK;
+    }
+    half * kbuf = (half*)rt_spm_malloc(kbuf_n * sizeof(half));      // BK * BN | BK * BM
     float * outc = (float*)rt_spm_malloc(BM * BN * sizeof(float));  // BM * BN
     half * obuf = (half*)rt_spm_malloc(BM * token_size);            // BM * BK
     float *o_accum = (float*)rt_spm_malloc(BM * BK * sizeof(float)); // BM * BK
@@ -179,10 +240,17 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
     int cur_q_index = 0;
     for (int b = 0; b < args.batch_size; b++) {
         int q_seq_len = args.q_seq_lens[b], k_seq_len = args.kv_seq_lens[b];
+        // D512 (BM == 32) only: queries that do not fill a whole BM block are handled by the
+        // transposed-score tail phase below.  This bound is the only place that decides it: a
+        // data-driven trip count, no branch and no implementation switch.
+        int q_full_end = q_seq_len;
+        if constexpr (BM == 32) {
+            q_full_end = q_seq_len - (q_seq_len % BM);
+        }
         memcpy(ldm_block_table, args.block_table + b * args.block_table_dim,
                args.block_table_dim * sizeof(int));
-        for (int i = 0; i < q_seq_len; i += BM) {
-            int cur_BM_q = MIN(BM, q_seq_len - i);
+        for (int i = part * UQ; i < q_full_end; i += parts * UQ) {
+            int cur_BM_q = MIN(UQ, q_seq_len - i);
 
             // init online softmax state for this Q block
             for (int idx = 0; idx < BM * BK; idx++) {
@@ -196,10 +264,10 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
             float *m_ptr = m_prev, *m_next = m_cur;
 
             // load q [cur_BM, size_per_head]
-            int cur_BM = MIN(BM, q_seq_len - i);
+            int cur_BM = MIN(UQ, q_seq_len - i);
             half * src_q_ptr = (half *)args.q +
                                (cur_q_index + i) * (args.local_head_num * args.size_per_head) +
-                               tid * args.size_per_head;
+                               head * args.size_per_head;
             size_t q_src_stride = (args.local_head_num - 1) * token_size;
             memcpy_stride(qbuf, src_q_ptr, cur_BM * token_size, token_size, {0, q_src_stride});
 
@@ -209,55 +277,154 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                     qbuf[r] = 0;
                 }
             }
+
+            // NT form (BM == 32/64): build the transposed query block Q^T once per Q block so
+            // the per-KV-tile K staging transpose below disappears - the matmul takes A = ktmp
+            // directly and B = Q^T, and the score tile comes out transposed.  kbuf is free here
+            // (the K transpose it used to hold is skipped on these paths) and the PV staging
+            // moves to ktmp, which the NT GEMM has already consumed.  Q^T is held as 32-column
+            // panels, Q^T[:, 32*pb : 32*pb+32] contiguous with panel stride BK*32, because one
+            // teco-hal B operand is exactly one [BK, 32] panel; h-outer keeps the destination a
+            // contiguous vector store, the same shape the K staging transpose uses.
+            if constexpr (BM == 32 || BM == 64) {
+                for (int h = 0; h < BK; h++) {
+                    int r = 0;
+                    for (; r + 16 <= cur_BM; r += 16) {
+                        halfv16 v;
+                        half *vp = (half *)&v;
+                        for (int u = 0; u < 16; u++) {
+                            vp[u] = qbuf[(r + u) * BK + h];
+                        }
+                        simd_store(v, kbuf + (r >> 5) * (BK * 32) + h * 32 + (r & 31));
+                    }
+                    for (; r < cur_BM; r++) {
+                        kbuf[(r >> 5) * (BK * 32) + h * 32 + (r & 31)] = qbuf[r * BK + h];
+                    }
+                }
+            }
+            if constexpr (BM == 64) {
+                // BM == 64 has no tail phase, so a Q block whose cur_BM < BM leaves rows
+                // [cur_BM, BM) of outc untouched by the NT path; zero them once per Q block so
+                // the (never read back) discarded rows cannot hold stale/NaN SPM.
+                floatv16 zv = 0.0f;
+                for (int idx = 0; idx < BM * BN; idx += 16) {
+                    simd_store(zv, outc + idx);
+                }
+            }
     
-            for (int j = 0; j < k_seq_len; j += BN) {
+            // Causal KV-tile bound.  The causal mask below is applied unconditionally and a
+            // tile whose whole column range is masked out contributes exp(-inf) = 0 to l and 0
+            // to o while leaving m unchanged, so the online-softmax state after it is
+            // bit-identical to the state before it.  Stopping the scan at the first such tile
+            // (same q_start expression as apply_causal_mask) therefore visits exactly the tiles
+            // that can contribute and leaves every device output bit identical.
+            int causal_q_start = k_seq_len - q_seq_len;
+            if (causal_q_start < 0) causal_q_start = 0;
+            int kv_tile_end = causal_q_start + i + cur_BM;
+            if (kv_tile_end > k_seq_len) kv_tile_end = k_seq_len;
+            for (int j = 0; j < kv_tile_end; j += BN) {
                 int cur_BN = MIN(BN, k_seq_len - j);
 
                 // load k [cur_BN, size_per_head] -> ktmp
-                int kv_head_idx = tid / num_kv_groups;                  // GQA
+                int kv_head_idx = head / num_kv_groups;                 // GQA
                 int cur_block = j / args.block_size;                    // BN == block_size
                 load_kv_cache(ktmp, (const half *)args.key_cache, ldm_block_table, cur_block,
                               kv_head_idx , args.local_kv_head_num, args.block_size,
                               args.size_per_head, cur_BN);
 
-                // transpose ktmp[cur_BN, head_size] -> kbuf[head_size, cur_BN]
-                //   kbuf[h*BN + t] = ktmp[t*head_size + h]
-                for (int t = 0; t < cur_BN; t++) {
+                if constexpr (BM == 128) {
+                    // PROBE: same permutation, h-outer so the kbuf side is a contiguous
+                    // halfv16 store instead of a stride-BN scalar scatter.
                     for (int h = 0; h < args.size_per_head; h++) {
-                        kbuf[h * BN + t] = ktmp[t * args.size_per_head + h];
+                        half *dst_row = kbuf + h * BN;
+                        int t = 0;
+                        for (; t <= cur_BN - 16; t += 16) {
+                            halfv16 v;
+                            half *vp = (half *)&v;
+                            for (int u = 0; u < 16; u++) {
+                                vp[u] = ktmp[(t + u) * args.size_per_head + h];
+                            }
+                            simd_store(v, dst_row + t);
+                        }
+                        for (; t < cur_BN; t++) {
+                            dst_row[t] = ktmp[t * args.size_per_head + h];
+                        }
                     }
-                }
 
-                // clear unused columns of kbuf (cur_BN < BN)
-                if (cur_BN < BN) {
-                    for (int h = 0; h < args.size_per_head; h++) {
-                        for (int c = cur_BN; c < BN; c++) {
-                            kbuf[h * BN + c] = 0;
+                    // clear unused columns of kbuf (cur_BN < BN)
+                    if (cur_BN < BN) {
+                        for (int h = 0; h < args.size_per_head; h++) {
+                            for (int c = cur_BN; c < BN; c++) {
+                                kbuf[h * BN + c] = 0;
+                            }
                         }
                     }
                 }
 
-                // gemm: Q * K^T = score, using teco_hal matmul M2=128, N2=32
+                // gemm: Q * K^T = score, using teco_hal matmul M2<=128, N2=32
                 {
                     MatmulConfig matmul_cfg;
                     Matmul matmul(matmul_cfg);
-                    auto tensorQ = make_tensor<2>((half *)qbuf,
-                        {static_cast<size_t>(BM), static_cast<size_t>(args.size_per_head)});
-                    auto tensorK = make_tensor<2>((half *)kbuf,
-                        {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
-                    auto tensorC = make_tensor<2>((float *)outc,
-                        {static_cast<size_t>(BM), static_cast<size_t>(BN)});
+                    if constexpr (BM == 32 || BM == 64) {
+                        // NT form: A = the K tile itself (contiguous [cur_BN, BK], no staging
+                        // transpose), B = the 32-column Q^T panels that carry a live query row
+                        // (built once per Q block); each C is one S^T panel [cur_BN, 32] and is
+                        // flipped back into S [cur_BM, BN].  One M128_N32 call per panel keeps
+                        // every operand in the layout this file already uses for BM == 32: the
+                        // B/C row stride is exactly N2 == 32.  MatmulBlockConfig::M64_N64 is
+                        // deliberately not used: its H-2 HAL form loads B from a panel-major
+                        // layout (second panel at element offset K*32) and ignores B strides, so
+                        // a plain row-major [BK, 64] view would be read wrongly.
+                        float *st = (float *)obuf;
+                        auto tA = make_tensor<2>((half *)ktmp,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BK)});
+                        const int npb = (cur_BM + 31) >> 5;   // live 32-column panels: 1 or 2
+                        for (int pb = 0; pb < npb; pb++) {
+                            auto tB = make_tensor<2>((half *)(kbuf + pb * (BK * 32)),
+                                {static_cast<size_t>(BK), static_cast<size_t>(32)});
+                            auto tST = make_tensor<2>((float *)(st + pb * (cur_BN * 32)),
+                                {static_cast<size_t>(cur_BN), static_cast<size_t>(32)});
+                            matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                                tA, tB, /*is_lastk=*/true);
+                            matmul.storeC_spm_async(tST);
+                            matmul.wait_storeC(1);
+                        }
+                        for (int r = 0; r < cur_BM; r++) {
+                            const float *sp = st + (r >> 5) * (cur_BN * 32) + (r & 31);
+                            float *op = outc + r * BN;
+                            for (int t = 0; t < cur_BN; t++) {
+                                op[t] = sp[t * 32];
+                            }
+                        }
+                    } else {
+                        int gemm_m = BM;
+                        if constexpr (BM == 128 || BM == 64) {
+                            gemm_m = cur_BM;
+                        }
+                        auto tensorQ = make_tensor<2>((half *)qbuf,
+                            {static_cast<size_t>(gemm_m),
+                             static_cast<size_t>(args.size_per_head)});
+                        auto tensorK = make_tensor<2>((half *)kbuf,
+                            {static_cast<size_t>(args.size_per_head), static_cast<size_t>(BN)});
+                        auto tensorC = make_tensor<2>((float *)outc,
+                            {static_cast<size_t>(gemm_m), static_cast<size_t>(BN)});
 
-                    matmul.compute_async<MatmulBlockConfig::M128_N32>(
-                        tensorQ, tensorK, /*is_lastk=*/true);
-                    matmul.storeC_spm_async(tensorC);
-                    matmul.wait_storeC(1);
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(
+                            tensorQ, tensorK, /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tensorC);
+                        matmul.wait_storeC(1);
+                    }
                 }
 
                 // simd mul softmax_scale
                 {
                     floatv16 vscale = args.softmax_scale;
                     int total = BM * BN;
+                    if constexpr (BM == 32 || BM == 128) {
+                        // D512/BM32: only the cur_BM observed query rows are ever read back
+                        // (Step A/B/E, normalize, output DMA are all cur_BM scoped).
+                        total = cur_BM * BN;
+                    }
                     int si = 0;
                     for (; si <= total - 16; si += 16) {
                         floatv16 v;
@@ -283,14 +450,29 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                 // Step B: o_accum: O *= exp(m_old - m_new)
                 for (int ri = 0; ri < cur_BM; ri++) {
                     float s = scale[ri];
-                    for (int rk = 0; rk < BK; rk++) {
-                        o_accum[ri * BK + rk] *= s;
+                    if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                        floatv16 vscale = s;
+                        float *row = o_accum + ri * BK;
+                        for (int rk = 0; rk < BK; rk += 16) {
+                            floatv16 value;
+                            simd_load(value, row + rk);
+                            value = value * vscale;
+                            simd_store(value, row + rk);
+                        }
+                    } else {
+                        for (int rk = 0; rk < BK; rk++) {
+                            o_accum[ri * BK + rk] *= s;
+                        }
                     }
                 }
 
                 // Step C: float->half: outc -> p_score (独立buffer, 非ktmp, 避免head_size=64越界)
                 {
                     int total = BM * BN;
+                    if constexpr (BM == 32 || BM == 128) {
+                        // D512/BM32: rows >= cur_BM only feed P@V rows that are discarded.
+                        total = cur_BM * BN;
+                    }
                     int si = 0;
                     for (; si + 16 <= total; si += 16) {
                         floatv16 vf;
@@ -319,39 +501,87 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
                     + kv_head_idx  * args.block_size * args.size_per_head;
 
                 half * vbuf = kbuf;
+                if constexpr (BM == 32 || BM == 64) {
+                    // The NT GEMM above already consumed the K tile, so the PV staging can reuse
+                    // ktmp and leave kbuf (which holds Q^T) intact across KV tiles.
+                    vbuf = ktmp;
+                }
                 float * outO = outc;            // reuse outc
                 int gemm_bn = 32;
-                for (int hb = 0; hb < BK / gemm_bn; hb++) {
-                    // V[:, hb*32 : hb*32+31] -> vbuf [cur_BN, gemm_bn] packed
-                    //   src: V[i][hb*32..hb*32+31] = cache[(i)*head_size + hb*32 .. +31]
-                    //   des: vbuf packed
-                    memcpy_stride(vbuf, v_cache_base + hb * gemm_bn,
-                                  cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
-                                  {0, (args.size_per_head - gemm_bn) * sizeof(half)});
+                // V-A (same transformation that landed on the D128 TU in 0371909): the per-panel
+                // strided V pack is issued one panel ahead on a MemcpyHandle and overlapped with
+                // the previous panel's PV GEMM.  The two panes live inside the same BN*BK-half
+                // staging buffer the synchronous code reuses panel by panel (2 * BN*gemm_bn
+                // halfs <= BN*BK halfs for every head_dim this TU instantiates), so the SPM
+                // footprint does not change.  A pane is rewritten one iteration after its last
+                // reader, i.e. only after that iteration's wait_storeC(1) has retired the GEMM
+                // which consumed it (a C store cannot complete before the operands it consumed
+                // are in), so there is no read/write hazard.  The look-ahead of the last panel is
+                // clamped to a valid panel index - a redundant but well-formed DMA - instead of a
+                // zero-length one, and its handle is retired after the loop before ktmp is handed
+                // back to the K staging of the next KV tile.  The loop body stays branch-free
+                // (data-driven trip counts only) and the staged bytes are exactly those of the
+                // synchronous pack, so the panel payload the GEMM sees is bit-identical.
+                half *vbuf2 = vbuf + BN * gemm_bn;
+                const int npanel = BK / gemm_bn;
+                MemcpyHandle vh[2];
+                memcpy_async(vbuf, v_cache_base, cur_BN * gemm_bn * sizeof(half),
+                             gemm_bn * sizeof(half),
+                             {0, (args.size_per_head - gemm_bn) * sizeof(half)},
+                             MemcpyGlobalToSpm, vh[0]);
+                for (int hb = 0; hb < npanel; hb++) {
+                    half *pane = ((hb & 1) == 0) ? vbuf : vbuf2;
+                    half *nxt = ((hb & 1) == 0) ? vbuf2 : vbuf;
+                    memcpy_wait(vh[hb & 1]);
+                    // look one panel ahead; the clamp makes the last issue a redundant reload of
+                    // the last panel (valid DMA, no zero-length descriptor)
+                    {
+                        int hbn = MIN(hb + 1, npanel - 1);
+                        memcpy_async(nxt, v_cache_base + hbn * gemm_bn,
+                                     cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
+                                     {0, (args.size_per_head - gemm_bn) * sizeof(half)},
+                                     MemcpyGlobalToSpm, vh[(hb + 1) & 1]);
+                    }
 
-                    // clear unused rows of vbuf (cur_BN < BN)
-                    if (cur_BN < BN) {
-                        for (int r = cur_BN * gemm_bn; r < BN * gemm_bn; r++) {
-                            vbuf[r] = 0;
-                        }
+                    // clear unused rows of the consumed pane (cur_BN < BN); zero trip count when
+                    // cur_BN == BN
+                    for (int r = cur_BN * gemm_bn; r < BN * gemm_bn; r++) {
+                        pane[r] = 0;
                     }
 
                     MatmulConfig cfg;
                     Matmul matmul(cfg);
-                    auto tP = make_tensor<2>(p_score, {(size_t)BM, (size_t)BN});
-                    auto tV = make_tensor<2>(vbuf, {(size_t)BN, (size_t)gemm_bn});
-                    auto tO = make_tensor<2>((float *)outO, {(size_t)BM, (size_t)gemm_bn});
+                    int gemm_m2 = BM;
+                    if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                        gemm_m2 = cur_BM;
+                    }
+                    auto tP = make_tensor<2>(p_score, {(size_t)gemm_m2, (size_t)BN});
+                    auto tV = make_tensor<2>(pane, {(size_t)BN, (size_t)gemm_bn});
+                    auto tO = make_tensor<2>((float *)outO, {(size_t)gemm_m2, (size_t)gemm_bn});
                     matmul.compute_async<MatmulBlockConfig::M128_N32>(tP, tV, true);
                     matmul.storeC_spm_async(tO);
                     matmul.wait_storeC(1);
 
                     // Step E: o_accum[i][hb*32 + k] += outO[i][k]
                     for (int ai = 0; ai < cur_BM; ai++) {
-                        for (int ak = 0; ak < gemm_bn; ak++) {
-                            o_accum[ai * BK + hb * gemm_bn + ak] += outO[ai * gemm_bn + ak];
+                        if constexpr (BM == 32 || BM == 64 || BM == 128) {
+                            float *dst = o_accum + ai * BK + hb * gemm_bn;
+                            float *src = outO + ai * gemm_bn;
+                            for (int ak = 0; ak < 32; ak += 16) {
+                                floatv16 previous, contribution;
+                                simd_load(previous, dst + ak);
+                                simd_load(contribution, src + ak);
+                                previous = previous + contribution;
+                                simd_store(previous, dst + ak);
+                            }
+                        } else {
+                            for (int ak = 0; ak < gemm_bn; ak++) {
+                                o_accum[ai * BK + hb * gemm_bn + ak] += outO[ai * gemm_bn + ak];
+                            }
                         }
                     }
                 }
+                memcpy_wait(vh[npanel & 1]);
 
                 // swap pointer
                 float *tmp = l_ptr; l_ptr = l_next; l_next = tmp;
@@ -381,13 +611,241 @@ __global__ void teco_slave_flash_attention_half(FlashAttentionArgs args) {
             }
 
             // dma O
-            int rel_obuf_size = MIN(BM, q_seq_len - i) * token_size;
+            // Only rows [0, cur_BM_q) of obuf were normalised above, so the DMA must stop
+            // there too: with UQ < BM the block-scoped MIN(BM, q_seq_len - i) copied stale SPM
+            // rows over the next unit's output rows (NaN / lost-update race).
+            int rel_obuf_size = cur_BM_q * token_size;
             size_t o_dst_stride = (args.local_head_num - 1) * token_size;
             half *out_base = (half *)args.fmha_out +
                              (cur_q_index + i) * args.local_head_num * args.size_per_head +
-                             tid * args.size_per_head;
+                             head * args.size_per_head;
             memcpy_stride(out_base, obuf, rel_obuf_size, token_size, {o_dst_stride, 0});
+        }
+
+        // D512 tail phase (BM == 32): the queries left over after the full BM blocks are scored
+        // by the SAME matmul, but with K as the A operand and a transposed query block as B
+        // (S^T = K * Q^T).  The per-KV-tile K staging transpose therefore disappears: the query
+        // block is transposed once per tail block (instead of K once per KV tile) and the scores
+        // are transposed back (tq * cur_BN elements), after which scale / causal mask /
+        // online softmax / Step C / V staging / P@V / Step E / normalize are the same code and
+        // the same arithmetic as the full-block path above.  Entered purely by the data-driven
+        // loop bound above (zero iterations when q_seq_len % BM == 0).
+        if constexpr (BM == 32) {
+            int tq = q_seq_len - q_full_end;
+            if (tq > 0) {
+                half *qt = qbuf;                        // [BK, BM] transposed query block
+                {
+                    floatv16 zf = 0.0f;
+                    halfv16 zh = (halfv16)zf;
+                    for (int idx = 0; idx < BK * BM; idx += 16) {
+                        simd_store(zh, qt + idx);
+                    }
+                    // Stage the tail query rows with one strided DMA - the same primitive the
+                    // full-block path above uses - instead of scalar global loads (a scalar
+                    // 2-byte global load costs ~150 cycles here and dominated the phase), then
+                    // transpose SPM -> SPM.
+                    half *qstage = kbuf;
+                    const half *src_q_ptr = (const half *)args.q +
+                        (cur_q_index + q_full_end) *
+                            (args.local_head_num * args.size_per_head) +
+                        tid * args.size_per_head;
+                    size_t q_src_stride = (args.local_head_num - 1) * token_size;
+                    memcpy_stride(qstage, src_q_ptr, tq * token_size, token_size,
+                                  {0, q_src_stride});
+                    for (int r = 0; r < tq; r++) {
+                        const half *row = qstage + r * args.size_per_head;
+                        for (int h = 0; h < BK; h++) {
+                            qt[h * BM + r] = row[h];
+                        }
+                    }
+                }
+                for (int idx = 0; idx < tq * BK; idx++) {
+                    o_accum[idx] = 0.0f;
+                }
+                for (int row = 0; row < tq; row++) {
+                    l_prev[row] = 0.0f;
+                }
+                fill_inf(m_prev, tq);
+                float *l_ptr = l_prev, *l_next = l_cur;
+                float *m_ptr = m_prev, *m_next = m_cur;
+
+                for (int j = 0; j < k_seq_len; j += BN) {
+                    int cur_BN = MIN(BN, k_seq_len - j);
+                    int kv_head_idx = tid / num_kv_groups;
+                    int cur_block = j / args.block_size;
+                    load_kv_cache(ktmp, (const half *)args.key_cache, ldm_block_table, cur_block,
+                                  kv_head_idx, args.local_kv_head_num, args.block_size,
+                                  args.size_per_head, cur_BN);
+
+                    // S^T = K * Q^T: A = ktmp (contiguous [cur_BN, BK], no transpose at all),
+                    // B = qt ([BK, BM], row stride BM == 32, exactly what the HAL assumes).
+                    float *st = (float *)obuf;          // [cur_BN, BM] score^T scratch
+                    {
+                        MatmulConfig cfg;
+                        Matmul matmul(cfg);
+                        auto tK = make_tensor<2>((half *)ktmp,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BK)});
+                        auto tQt = make_tensor<2>((half *)qt,
+                            {static_cast<size_t>(BK), static_cast<size_t>(BM)});
+                        auto tST = make_tensor<2>((float *)st,
+                            {static_cast<size_t>(cur_BN), static_cast<size_t>(BM)});
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(tK, tQt,
+                                                                          /*is_lastk=*/true);
+                        matmul.storeC_spm_async(tST);
+                        matmul.wait_storeC(1);
+                    }
+
+                    // S^T [cur_BN, BM] -> S [tq, cur_BN] (only the live query columns)
+                    for (int t = 0; t < cur_BN; t++) {
+                        for (int r = 0; r < tq; r++) {
+                            outc[r * BN + t] = st[t * BM + r];
+                        }
+                    }
+
+                    // simd mul softmax_scale
+                    {
+                        floatv16 vscale = args.softmax_scale;
+                        int total = tq * BN;
+                        int si = 0;
+                        for (; si <= total - 16; si += 16) {
+                            floatv16 v;
+                            simd_load(v, outc + si);
+                            v = simd_mul(v, vscale);
+                            simd_store(v, outc + si);
+                        }
+                        for (; si < total; si++) {
+                            outc[si] *= args.softmax_scale;
+                        }
+                    }
+
+                    // causal mask inplace
+                    apply_causal_mask(outc, tq, cur_BN, q_full_end, j, q_seq_len, k_seq_len,
+                                      BM, BN);
+
+                    // Step A: online softmax
+                    online_softmax_step(outc, m_ptr, l_ptr, m_next, l_next, scale, tq, cur_BN,
+                                        BN);
+
+                    // Step B: o_accum: O *= exp(m_old - m_new)
+                    for (int ri = 0; ri < tq; ri++) {
+                        float s = scale[ri];
+                        floatv16 vscale = s;
+                        float *row = o_accum + ri * BK;
+                        for (int rk = 0; rk < BK; rk += 16) {
+                            floatv16 v;
+                            simd_load(v, row + rk);
+                            simd_store(simd_mul(v, vscale), row + rk);
+                        }
+                    }
+
+                    // Step C: float->half: outc -> p_score
+                    {
+                        int total = tq * BN;
+                        int si = 0;
+                        for (; si <= total - 16; si += 16) {
+                            floatv16 vf;
+                            halfv16 vh;
+                            simd_load(vf, outc + si);
+                            vh = (halfv16)vf;
+                            simd_store(vh, p_score + si);
+                        }
+                        for (; si < total; si++) {
+                            p_score[si] = (half)outc[si];
+                        }
+                    }
+
+                    // last turn clean p_score
+                    for (int ri = 0; ri < tq; ri++) {
+                        for (int cj = cur_BN; cj < BN; cj++) {
+                            p_score[ri * BN + cj] = 0;
+                        }
+                    }
+
+                    // Step D: load V, gemm p_score @ V
+                    int block_id = ldm_block_table[cur_block];
+                    const half *v_cache_base = (const half *)args.value_cache
+                        + block_id * args.local_kv_head_num * args.block_size *
+                              args.size_per_head
+                        + kv_head_idx * args.block_size * args.size_per_head;
+                    half *vbuf = kbuf;
+                    float *outO = outc;
+                    int gemm_bn = 32;
+                    for (int hb = 0; hb < BK / gemm_bn; hb++) {
+                        memcpy_stride(vbuf, v_cache_base + hb * gemm_bn,
+                                      cur_BN * gemm_bn * sizeof(half), gemm_bn * sizeof(half),
+                                      {0, (args.size_per_head - gemm_bn) * sizeof(half)});
+                        if (cur_BN < BN) {
+                            for (int r = cur_BN * gemm_bn; r < BN * gemm_bn; r++) {
+                                vbuf[r] = 0;
+                            }
+                        }
+                        MatmulConfig cfg;
+                        Matmul matmul(cfg);
+                        auto tP = make_tensor<2>(p_score, {(size_t)tq, (size_t)BN});
+                        auto tV = make_tensor<2>(vbuf, {(size_t)BN, (size_t)gemm_bn});
+                        auto tO = make_tensor<2>((float *)outO, {(size_t)tq, (size_t)gemm_bn});
+                        matmul.compute_async<MatmulBlockConfig::M128_N32>(tP, tV, true);
+                        matmul.storeC_spm_async(tO);
+                        matmul.wait_storeC(1);
+
+                        // Step E: o_accum[i][hb*32 + k] += outO[i][k]
+                        for (int ai = 0; ai < tq; ai++) {
+                            float *dst = o_accum + ai * BK + hb * gemm_bn;
+                            float *src = outO + ai * gemm_bn;
+                            for (int ak = 0; ak < 32; ak += 16) {
+                                floatv16 previous, contribution;
+                                simd_load(previous, dst + ak);
+                                simd_load(contribution, src + ak);
+                                simd_store(previous + contribution, dst + ak);
+                            }
+                        }
+                    }
+
+                    float *tmp = l_ptr; l_ptr = l_next; l_next = tmp;
+                    tmp = m_ptr; m_ptr = m_next; m_next = tmp;
+                }
+
+                // normalize the tail rows by l and convert to half
+                for (int row = 0; row < tq; row++) {
+                    float l_inv = 1.0f / l_ptr[row];
+                    floatv16 vl_inv = l_inv;
+                    float *o_row = o_accum + row * args.size_per_head;
+                    half *obuf_row = obuf + row * args.size_per_head;
+                    int k = 0;
+                    for (; k <= args.size_per_head - 16; k += 16) {
+                        floatv16 vf;
+                        halfv16 vh;
+                        simd_load(vf, o_row + k);
+                        vf = vf * vl_inv;
+                        vh = (halfv16)vf;
+                        simd_store(vh, obuf_row + k);
+                    }
+                    for (; k < args.size_per_head; k++) {
+                        obuf_row[k] = (half)(o_row[k] * l_inv);
+                    }
+                }
+
+                // dma the tail rows out
+                {
+                    int rel_obuf_size = tq * token_size;
+                    size_t o_dst_stride = (args.local_head_num - 1) * token_size;
+                    half *out_base = (half *)args.fmha_out +
+                        (cur_q_index + q_full_end) * args.local_head_num *
+                            args.size_per_head +
+                        tid * args.size_per_head;
+                    memcpy_stride(out_base, obuf, rel_obuf_size, token_size, {o_dst_stride, 0});
+                }
+            }
         }
         cur_q_index += q_seq_len;
     }
+}
+
+
+__global__ void teco_slave_flash_attention_half_d256(FlashAttentionArgs args) {
+    flash_attention_half<64>(args);
+}
+
+__global__ void teco_slave_flash_attention_half_d512(FlashAttentionArgs args) {
+    flash_attention_half<32>(args);
 }
