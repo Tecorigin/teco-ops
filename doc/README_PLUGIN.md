@@ -394,6 +394,46 @@ export LD_LIBRARY_PATH=<lib_path>:${LD_LIBRARY_PATH}
 2. ONNX 模型节点指定了 `domain="my_custom_ops"`
 3. 模型添加了 `helper.make_opsetid("my_custom_ops", 1)`
 
+## Flash attention 拒绝路径复核
+
+真实设备 C API 探针不依赖 TVM/TecoInference。先加载厂商 SDK 环境，使用已安装
+并经 `/proc/self/maps` 核对的同一 `.so`，在团队共享设备锁内执行：
+
+```bash
+source /opt/tecoai/setvars.sh
+# WITH_TORCH builds may link libtorch.so; use this vendor Python's existing libs.
+export LD_LIBRARY_PATH=/home/py312/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}
+/home/py312/bin/python plugin_test/flash_attention_c_api.py \
+    --core /absolute/path/to/libteco_ops_plugin.so --gid 0
+```
+
+`--gid` 为当前可见设备序号（默认 0）。两条负例为 `head_size=48` 和
+`block_size=64`；每条必须返回 status 6 且探针自己分配的设备输出哨兵 7.0
+逐元素不变，输出记录库路径、SHA256 与断言结果。缺库或断言失败非零退出。
+
+完整 SDK 测试（需要 TVM、TecoInference 和 ONNX，同样须协调设备锁）：
+
+```bash
+/home/py312/bin/python plugin_test/test_plugin_flash_attention.py
+```
+
+它保留四条数值正例与 mapped C API 的 status/sentinel 硬断言。SDK 自身只断言
+拒绝运行及可读的 status 6；若 SDK 把异常文本抹为 `std::exception`，明确标记
+SDK 状态不可读，依赖先通过的 C API 检查。SDK `set_output/get_output` 未证明
+返回同一 buffer，故不宣称 SDK sentinel untouched。失败后打印可读 SDK 输出的
+`min/max/mean/std/first8`，仅作诊断，不能据此认定 fallback 或重新分配。
+
+无设备 mock 契约回归（只依赖 NumPy，不加载 SDK/runtime）：
+
+```bash
+/home/py312/bin/python -m unittest discover -s plugin_test \
+    -p test_flash_attention_rejection_contract.py -v
+```
+
+mock 检查 SDK 成功/错误状态/无关异常仍被拒绝，输出重新分配或不可读不会被
+误判为 C API 写坏输出，并检查 C API 状态或哨兵失败仍硬失败。它不替代真实
+C API 或完整 SDK 测试；若环境无 SDK，必须明确报告未运行 SDK 门禁。
+
 ## License
 
 请参考项目根目录的 LICENSE 文件。

@@ -147,7 +147,7 @@ void flash_attn_varlen_func_torch(
     make_desc(vCacheDesc, TECOOPS_DATA_HALF, v);
     make_desc(oDataDesc, TECOOPS_DATA_HALF, out);
 
-    tecoopsFlashAttention(handle,
+    const auto status = tecoopsFlashAttention(handle,
                           max_seqlen_q, max_seqlen_k, max_block_num,
                           (const int*)q_lens.data_ptr(), (const int *)seqused_k.data_ptr(),
                           blockTableDesc, block_table.data_ptr(),
@@ -157,11 +157,18 @@ void flash_attn_varlen_func_torch(
                           oDataDesc, out.data_ptr(),
                           /*workspace=*/nullptr);
 
+    // The native entry point returns early with a non-SUCCESS status when dispatch rejects the
+    // parameters (findImpl -> Status::NOT_IMPLEMENTED) or an argument check fails.  Discarding it
+    // made such calls look successful and handed back the uninitialized output buffer allocated
+    // above.  Surface it as a Python-level error instead.
     tecoopsDestroyTensorDescriptor(blockTableDesc);
     tecoopsDestroyTensorDescriptor(qDataDesc);
     tecoopsDestroyTensorDescriptor(kCacheDesc);
     tecoopsDestroyTensorDescriptor(vCacheDesc);
     tecoopsDestroyTensorDescriptor(oDataDesc);
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "flash_attn_varlen_func rejected parameters (status ",
+                static_cast<int>(status), ")");
 }
 
 void causal_conv1d_fn_torch(

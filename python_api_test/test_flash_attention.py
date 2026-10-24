@@ -366,6 +366,29 @@ def test_multi_batch():
 
     return all_ok
 
+def test_dispatch_guards():
+    """Unsupported layouts must raise instead of exposing unwritten output or bad dispatch."""
+    cases = [(48, 32, 1), (192, 32, 1), (256, 32, 1), (512, 32, 1),
+             (128, 16, 2), (128, 64, 1), (128, 128, 1), (160, 32, 8192)]
+    for head_size, block_size, table_dim in cases:
+        q, kc, vc, bt = _make_random_fa_inputs([1], [32], 8, 4, head_size, block_size)
+        bt = torch.nn.functional.pad(bt, (0, table_dim - bt.shape[1]))
+        try:
+            _run_one_fa_test(q, kc, vc, [1], [32], bt)
+        except RuntimeError as exc:
+            if "rejected parameters" not in str(exc):
+                raise
+            # EXPECTED_FAIL is the marker the CI runner (#51 tools/ci_test.sh) exempts
+            # from its "a FAILED line means the run failed" rule.  This line is an
+            # assertion that the shape was rejected; the low-level "tecoual runtime
+            # error" / "branch is not exit" log records produced by the rejection path
+            # belong to it and are not defects.
+            print(f"  rejected head_dim={head_size}, block_size={block_size}, table_dim={table_dim}: PASSED (EXPECTED_FAIL)")
+        else:
+            raise AssertionError(f"accepted unsupported head_dim={head_size}, block_size={block_size}")
+    return True
+
+
 # ========================================================================
 # 主入口
 # ========================================================================
@@ -388,6 +411,7 @@ if __name__ == "__main__":
         ("test_chunked_prefill",  test_chunked_prefill),
         ("test_gqa",  test_gqa),
         ("test_multi_batch",  test_multi_batch),
+        ("test_dispatch_guards", test_dispatch_guards),
     ]
 
     all_passed = True
@@ -397,8 +421,15 @@ if __name__ == "__main__":
 
     print()
     print("=" * 60)
+    print("NOTE: negative cases are expected to fail (EXPECTED_FAIL).")
+    print("      The \"rejected ...: PASSED (EXPECTED_FAIL)\" lines assert that an")
+    print("      unsupported shape was rejected before kernel launch; the matching")
+    print("      low-level \"tecoual runtime error\" / \"branch is not exit\" log lines")
+    print("      are emitted by that rejection path, not by a functional defect.")
+    print("=" * 60)
     if all_passed:
         print("ALL TESTS PASSED")
     else:
         print("SOME TESTS FAILED")
     print("=" * 60)
+    raise SystemExit(0 if all_passed else 1)
