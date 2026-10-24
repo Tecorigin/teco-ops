@@ -1,0 +1,42 @@
+op_name: "weight_stream_gemv"
+
+input {
+  id: "x"
+  shape { dims: 48 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data {
+    seed: 53
+    lower_bound: -0.5
+    upper_bound: 0.5
+    distribution: UNIFORM
+  }
+}
+
+input {
+  id: "weight"
+  shape { dims: 192 dims: 48 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+  random_data {
+    seed: 54
+    lower_bound: -0.5
+    upper_bound: 0.5
+    distribution: UNIFORM
+  }
+}
+
+output {
+  id: "output"
+  shape { dims: 192 }
+  layout: LAYOUT_ARRAY
+  dtype: DTYPE_HALF
+  ttype: TENSOR
+}
+
+test_param {
+  error_func: DIFF1
+  error_threshold: 1e-2
+}

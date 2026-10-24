@@ -1,0 +1,268 @@
+// BSD 3- Clause License Copyright (c) 2024, Tecorigin Co., Ltd. All rights
+// reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// Redistributions of source code must retain the above copyright notice, this
+// list of conditions and the following disclaimer.
+// Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+// Neither the name of the copyright holder nor the names of its contributors
+// may be used to endorse or promote products derived from this software
+// without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+// STRICT LIABILITY,OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)  ARISING IN ANY
+// WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+// OF SUCH DAMAGE.
+
+// weight_stream_gemv: M=1 decode GEMV organised around streaming the weight
+// matrix, not around a tiled GEMM.
+//
+// Structure (one core of 32, rows split as contiguous blocks by R1C32_CR):
+//   * the activation row x[K] is fetched once and converted to fp32 in SPM - it
+//     is reused by every weight row this core owns;
+//   * the weight matrix is consumed as CONTIGUOUS slabs of `slab` whole rows
+//     (slab*K*2 bytes), double buffered, so each DMA is one large burst and the
+//     core never waits on a small strided transfer;
+//   * each weight row is reduced against x with a 16-wide fp32 FMA chain plus one
+//     horizontal reduce, then stored into a per-core SPM output buffer and
+//     flushed with a single DMA at the end.
+//
+// Numerics: fp16 operands, fp32 accumulation, single fp16 rounding of the result
+// - the same skeleton as the vendor GEMM, but with this kernel's own reduction
+// order.  That ordering difference is exactly what the model-level token-ID
+// parity gate measures.
+
+#include <simd.h>
+#include <slave.h>
+
+#include "ual/com/rt.h"
+#include "ual/kernel/weight_stream_gemv/weight_stream_gemv.h"
+
+#include "teco_hal_tensor.hpp"
+#include "teco_hal_tile.hpp"
+
+using namespace tecoops::ual::args;  // NOLINT
+using namespace teco::hal;            // NOLINT
+using namespace sdaa;                 // NOLINT
+
+namespace {
+// SPM bytes this kernel may own in one core.  The delivered flash_attention
+// kernel already holds ~450 KB, so 192 KB is deliberately conservative.
+constexpr size_t WSG_SPM_BUDGET = 192 * 1024;
+constexpr int WSG_SLAB_MAX = 32;
+
+// Fail-loud SPM allocation.  rt_spm_malloc() (ual/com/rt.h:56-73)
+// is a statement expression that *prints and then returns from the function it
+// is expanded in* when the request does not fit, so a null test at the kernel
+// call site can never run: the kernel exits with the output buffer untouched
+// while the host still sees a successful launch (cycle-27 H-1: 140288/140288
+// outputs stayed at their sentinel values and 903648 "spm malloc failed" lines
+// were the only trace).  Expanding the macro inside this helper turns that early
+// exit into a visible nullptr.  The success path is unchanged: same allocator,
+// same arguments, same returned pointer.
+__device__ void wsg_spm_try_alloc(size_t need, char **out) {
+    *out = static_cast<char *>(rt_spm_malloc(need));
+}
+}  // namespace
+
+__global__ void teco_slave_weight_stream_gemv(WeightStreamGemvArgs args) {
+    const int N = args.n;
+    const int K = args.k;
+
+    half *x_hbm = static_cast<half *>(const_cast<void *>(args.x));
+    half *w_hbm = static_cast<half *>(const_cast<void *>(args.w));
+    half *y_hbm = static_cast<half *>(args.y);
+
+    Tensor<half, 2> w_gm(w_hbm, {static_cast<size_t>(N), static_cast<size_t>(K)});
+    auto tile = make_tile<SplitMode::R1C32_CR>(
+        w_gm, {static_cast<size_t>(N), static_cast<size_t>(K)});
+    auto block = tile.compute_core_block_shape();
+    const int my_rows = static_cast<int>(block[0]);
+    if (my_rows <= 0) return;
+
+    // Row-major element offset of this core's first row: row0 * K.
+    const size_t offset = tile.compute_linear_index();
+    const int row0 = static_cast<int>(offset / static_cast<size_t>(K));
+
+    const size_t row_bytes = static_cast<size_t>(K) * sizeof(half);
+    const size_t y_bytes = static_cast<size_t>(my_rows) * sizeof(half);
+
+    int slab = static_cast<int>((WSG_SPM_BUDGET - 6 * static_cast<size_t>(K) - y_bytes) /
+                                (2 * row_bytes));
+    if (slab < 1) slab = 1;
+    if (slab > WSG_SLAB_MAX) slab = WSG_SLAB_MAX;
+    if (slab > my_rows) slab = my_rows;
+    // [c39-HY-WSG-SPLIT] Both official cases end up with slab == my_rows, so the
+    // double-buffered loop below runs exactly ONE iteration and its prefetch branch
+    // never fires: the whole slab DMA is exposed in front of every core's compute.
+    // Capping the slab at half of the rows this core owns makes the loop run twice,
+    // so the second half of the weight rows is prefetched while the first half is
+    // being reduced.  Every row still scores against x with the identical ILP4 chain
+    // and the identical reduction order, and the activation row is untouched, so the
+    // stored bytes are unchanged - only the DMA/compute schedule moves.
+    if (slab > (my_rows + 1) / 2) slab = (my_rows + 1) / 2;
+
+    const size_t slab_bytes = static_cast<size_t>(slab) * row_bytes;
+    // One contiguous SPM block with a single rt_spm_malloc / rt_spm_free, the
+    // delivered-kernel pattern (rms_norm, flash_attention).  The CHECK_SPM_OVERFLOW
+    // allocator puts a 64 B guard before and after every block, so every carve is
+    // 64 B aligned and the whole request is padded.
+    //
+    // Only 32-byte (float16v16) SPM accesses are used anywhere below: every
+    // delivered kernel restricts itself to 32-byte half vectors, so this kernel
+    // keeps the activation row in fp16 in SPM and converts both operands in the
+    // inner loop.  fp16 -> fp32 is exact, so the arithmetic is unchanged.
+    const size_t x_bytes = static_cast<size_t>(K) * sizeof(half);
+    // [c36-variantA] The activation row is converted to fp32 ONCE below, so the
+    // per-row inner loop drops one of its two vfcvths per 16 lanes.  The fp32
+    // operands and the reduction order are unchanged (fp16 -> fp32 is exact),
+    // so this is a pure instruction-count reduction.
+    const size_t x32_bytes = static_cast<size_t>(K) * sizeof(float);
+    const size_t need = x_bytes + x32_bytes + 2 * slab_bytes + y_bytes + 256;
+    char *spm_base = nullptr;
+    wsg_spm_try_alloc(need, &spm_base);
+    if (spm_base == nullptr) {
+        // Refuse to let a buffer this kernel never wrote look like a result.
+        // ai_printf names the cause; the rcsr below is the very RAISE_EXCEPTION
+        // the delivered rt.h already uses for SPM overflow (CHECK_SPM_OVERFLOW is
+        // on by default, ual/com/rt.h:30), so an out-of-SPM configuration kills
+        // the process loudly instead of returning all-wrong numerics with rc=0.
+        ai_printf("[weight_stream_gemv] FATAL: SPM malloc failed: need=%lu "
+                  "(n=%d k=%d my_rows=%d slab=%d)\n",
+                  static_cast<unsigned long>(need), N, K, my_rows, slab);
+        unsigned int spm_fault_tmp;
+        asm volatile("rcsr %0,5\n" : "=&r"(spm_fault_tmp)::"memory");
+        return;
+    }
+
+    char *cur = spm_base;
+    cur += (64 - (reinterpret_cast<unsigned long>(cur) & 63UL)) & 63UL;
+    half *xspm = reinterpret_cast<half *>(cur);
+    cur += x_bytes;
+    // 64 B re-align after the fp16 activation row: x_bytes = K * sizeof(half) is
+    // only a multiple of 64 when K % 32 == 0.  For K % 32 == 16 (e.g. K = 48 or
+    // 2032) the fp32 activation buffer below would land 32 B aligned while the
+    // vector loop uses 64 B simd_load/simd_store on it, which the device rejects
+    // with SDAA_ERROR_MISALIGNED_ADDRESS during warm-up (measured on the c50
+    // zoo cases case_3 = 192x48 and case_5 = 128x2032).  This is entry-time
+    // pointer arithmetic, not a hot-path branch.
+    cur += (64 - (reinterpret_cast<unsigned long>(cur) & 63UL)) & 63UL;
+    float *xspm32 = reinterpret_cast<float *>(cur);
+    cur += x32_bytes;
+    half *wbuf0 = reinterpret_cast<half *>(cur);
+    cur += slab_bytes;
+    half *wbuf1 = reinterpret_cast<half *>(cur);
+    cur += slab_bytes;
+    half *yout = reinterpret_cast<half *>(cur);
+
+    half *wbuf[2] = {wbuf0, wbuf1};
+
+    // ---- fetch the activation row once into SPM (fp16, exact) ----
+    {
+        MemcpyHandle hx;
+        memcpy_async(xspm, x_hbm, x_bytes, MemcpyGlobalToSpm, hx);
+        memcpy_wait(hx);
+    }
+
+    // [c36-variantA] widen the activation row to fp32 exactly once; the inner
+    // loop then loads fp32 lanes directly instead of re-converting per row.
+    {
+        int j = 0;
+        for (; j + 16 <= K; j += 16) {
+            float16v16 hx;
+            simd_loadu(hx, xspm + j);
+            simd_store(simd_vfcvths(hx), xspm32 + j);
+        }
+        for (; j < K; ++j) xspm32[j] = static_cast<float>(xspm[j]);
+    }
+
+    MemcpyHandle get[2];
+    const int rows0 = (slab < my_rows) ? slab : my_rows;
+    memcpy_async(wbuf[0], w_hbm + offset, static_cast<size_t>(rows0) * row_bytes,
+                 MemcpyGlobalToSpm, get[0]);
+
+    for (int s0 = 0; s0 < my_rows; s0 += slab) {
+        const int cur = (s0 / slab) & 1;
+        const int rows = (my_rows - s0 < slab) ? (my_rows - s0) : slab;
+
+        memcpy_wait(get[cur]);
+
+        // Prefetch the next slab into the other buffer.  That buffer was last
+        // read by the previous iteration's (already finished) SIMD work.
+        if (s0 + slab < my_rows) {
+            const int nrow = (my_rows - s0 - slab < slab) ? (my_rows - s0 - slab) : slab;
+            memcpy_async(wbuf[cur ^ 1],
+                         w_hbm + offset + static_cast<size_t>(s0 + slab) * K,
+                         static_cast<size_t>(nrow) * row_bytes,
+                         MemcpyGlobalToSpm, get[cur ^ 1]);
+        }
+
+        for (int s = 0; s < rows; ++s) {
+            const half *wr = wbuf[cur] + static_cast<size_t>(s) * K;
+            // IVL-c31-W: four independent fp32 accumulator chains.  The delivered
+            // single chain is a serial dependency of K/16 simd_vfmas per row whose
+            // latency is not covered by the slab DMA, which is why the kernel
+            // measures 91.2 GB/s on the InternVL decode shapes while its own
+            // header quotes 92-197 GB/s for a pure streaming read of the same
+            // bytes.  Four chains shorten the exposed per-row dependency to K/64.
+            floatv16 acc0 = simd_vcpyfs(0.0f);
+            floatv16 acc1 = simd_vcpyfs(0.0f);
+            floatv16 acc2 = simd_vcpyfs(0.0f);
+            floatv16 acc3 = simd_vcpyfs(0.0f);
+            int j = 0;
+            for (; j + 64 <= K; j += 64) {
+                float16v16 w0;
+                floatv16 x0;
+                float16v16 w1;
+                floatv16 x1;
+                float16v16 w2;
+                floatv16 x2;
+                float16v16 w3;
+                floatv16 x3;
+                simd_loadu(w0, wr + j);
+                simd_load(x0, xspm32 + j);
+                simd_loadu(w1, wr + j + 16);
+                simd_load(x1, xspm32 + j + 16);
+                simd_loadu(w2, wr + j + 32);
+                simd_load(x2, xspm32 + j + 32);
+                simd_loadu(w3, wr + j + 48);
+                simd_load(x3, xspm32 + j + 48);
+                acc0 = simd_vfmas(x0, simd_vfcvths(w0), acc0);
+                acc1 = simd_vfmas(x1, simd_vfcvths(w1), acc1);
+                acc2 = simd_vfmas(x2, simd_vfcvths(w2), acc2);
+                acc3 = simd_vfmas(x3, simd_vfcvths(w3), acc3);
+            }
+            floatv16 acc = simd_vfadds(simd_vfadds(acc0, acc1), simd_vfadds(acc2, acc3));
+            for (; j + 16 <= K; j += 16) {
+                float16v16 hw;
+                floatv16 hx;
+                simd_loadu(hw, wr + j);
+                simd_load(hx, xspm32 + j);
+                acc = simd_vfmas(hx, simd_vfcvths(hw), acc);
+            }
+            float dot = simd_redsum(acc);
+            for (; j < K; ++j) dot += static_cast<float>(wr[j]) * xspm32[j];
+            yout[s0 + s] = static_cast<half>(dot);
+        }
+    }
+
+    // One contiguous flush of this core's whole output block.
+    MemcpyHandle put;
+    memcpy_async(y_hbm + row0, yout, y_bytes, MemcpySpmToGlobal, put);
+    memcpy_wait(put);
+    // [c36-hy3] the two trailing slab waits are redundant: every issued get was
+    // already waited at the top of its loop iteration, and when the core owns a
+    // single slab get[1] was never issued at all (cold handle).  Removing them
+    // cannot change the data path; it only drops two sync calls.
+    rt_spm_free(spm_base);
+}

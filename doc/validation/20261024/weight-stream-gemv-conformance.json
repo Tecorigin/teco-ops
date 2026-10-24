@@ -1,0 +1,3173 @@
+{
+  "operator": "weight_stream_gemv",
+  "passed": true,
+  "tol_ulps": 2.0,
+  "tol_abs_floor": 0.0001,
+  "failures": [],
+  "results": [
+    {
+      "kind": "binding",
+      "name": "weight_stream_gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "binding",
+      "name": "linear_stream",
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_0 n=256 k=256",
+      "spread": 4.76837158203125e-07,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_1 n=512 k=512",
+      "spread": 2.384185791015625e-07,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "decode n=256 k=2048",
+      "spread": 4.0531158447265625e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "decode n=256 k=3072",
+      "spread": 6.67572021484375e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "decode n=512 k=2048",
+      "spread": 9.5367431640625e-07,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "boundary n=128 (n%64==0)",
+      "spread": 3.5762786865234375e-07,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "boundary n=64 (n%64==0)",
+      "spread": 3.814697265625e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "spread": 1.1920928955078125e-07,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "spread": 3.822147846221924e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "spread": 4.76837158203125e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "spread": 1.049041748046875e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "spread": 8.344650268554688e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=15360 k=3840",
+      "spread": 9.5367431640625e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=131072 k=3840",
+      "spread": 1.0967254638671875e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=5120 k=3840",
+      "spread": 1.1444091796875e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=3840 k=7680",
+      "spread": 1.621246337890625e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=9216 k=1536",
+      "spread": 4.135072231292725e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=130560 k=1536",
+      "spread": 4.76837158203125e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=2560 k=1536",
+      "spread": 4.0531158447265625e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=1536 k=2048",
+      "spread": 4.291534423828125e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=1536 k=4608",
+      "spread": 1.1444091796875e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=12288 k=2048",
+      "spread": 4.76837158203125e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=120832 k=2048",
+      "spread": 6.67572021484375e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=3072 k=2048",
+      "spread": 5.245208740234375e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=2048 k=2048",
+      "spread": 4.291534423828125e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=2048 k=6144",
+      "spread": 1.430511474609375e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=4096 k=2048",
+      "spread": 4.76837158203125e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=12288 k=4096",
+      "spread": 1.0967254638671875e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=75968 k=4096",
+      "spread": 1.239776611328125e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=3072 k=4096",
+      "spread": 9.59634780883789e-06,
+      "status": "PASS"
+    },
+    {
+      "kind": "oracle",
+      "case": "census decode n=4096 k=6144",
+      "spread": 1.5497207641601562e-05,
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_0 n=256 k=256",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_0 n=256 k=256",
+      "max_error": 0.0009617805480957031,
+      "max_error_vs_fp64": 0.0009615421295166016,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.9921875,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_1 n=512 k=512",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_1 n=512 k=512",
+      "max_error": 0.00046896934509277344,
+      "max_error_vs_fp64": 0.00046896934509277344,
+      "allowed": 0.002053125,
+      "exact_round_fraction": 0.99609375,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "decode n=256 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "decode n=256 k=2048",
+      "max_error": 0.0019516944885253906,
+      "max_error_vs_fp64": 0.0019502639770507812,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.98828125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "decode n=256 k=3072",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "decode n=256 k=3072",
+      "max_error": 0.0038299560546875,
+      "max_error_vs_fp64": 0.0038270950317382812,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.98828125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "decode n=512 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "decode n=512 k=2048",
+      "max_error": 0.0009171962738037109,
+      "max_error_vs_fp64": 0.0009174346923828125,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.98828125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "boundary n=128 (n%64==0)",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "boundary n=128 (n%64==0)",
+      "max_error": 0.0009427070617675781,
+      "max_error_vs_fp64": 0.0009427070617675781,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.984375,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "boundary n=64 (n%64==0)",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "boundary n=64 (n%64==0)",
+      "max_error": 0.0036411285400390625,
+      "max_error_vs_fp64": 0.00363922119140625,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.984375,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "max_error": 0.00045037269592285156,
+      "max_error_vs_fp64": 0.00045037269592285156,
+      "allowed": 0.002053125,
+      "exact_round_fraction": 1.0,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "max_error": 0.00351715087890625,
+      "max_error_vs_fp64": 0.00351715087890625,
+      "allowed": 0.015725,
+      "exact_round_fraction": 1.0,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "max_error": 0.0038881301879882812,
+      "max_error_vs_fp64": 0.003887176513671875,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9966145753860474,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "max_error": 0.0075473785400390625,
+      "max_error_vs_fp64": 0.0075511932373046875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9950520992279053,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "max_error": 0.00640869140625,
+      "max_error_vs_fp64": 0.00641632080078125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.99267578125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=15360 k=3840",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=15360 k=3840",
+      "max_error": 0.0077991485595703125,
+      "max_error_vs_fp64": 0.0077953338623046875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9930338263511658,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=131072 k=3840",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=131072 k=3840",
+      "max_error": 0.007814407348632812,
+      "max_error_vs_fp64": 0.007818222045898438,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9821014404296875,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=5120 k=3840",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=5120 k=3840",
+      "max_error": 0.007389068603515625,
+      "max_error_vs_fp64": 0.0073871612548828125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.992382824420929,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=3840 k=7680",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=3840 k=7680",
+      "max_error": 0.007663726806640625,
+      "max_error_vs_fp64": 0.0076656341552734375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9828125238418579,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=9216 k=1536",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=9216 k=1536",
+      "max_error": 0.0038957595825195312,
+      "max_error_vs_fp64": 0.0038957595825195312,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9946831464767456,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=130560 k=1536",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=130560 k=1536",
+      "max_error": 0.003902435302734375,
+      "max_error_vs_fp64": 0.0039005279541015625,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9950903654098511,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=2560 k=1536",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=2560 k=1536",
+      "max_error": 0.0036468505859375,
+      "max_error_vs_fp64": 0.0036458969116210938,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9964843988418579,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=1536 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=1536 k=2048",
+      "max_error": 0.0038537979125976562,
+      "max_error_vs_fp64": 0.0038537979125976562,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9947916865348816,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=1536 k=4608",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=1536 k=4608",
+      "max_error": 0.006908416748046875,
+      "max_error_vs_fp64": 0.0069103240966796875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9928385615348816,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=12288 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=12288 k=2048",
+      "max_error": 0.0038967132568359375,
+      "max_error_vs_fp64": 0.0038957595825195312,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9740397334098816,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=120832 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=120832 k=2048",
+      "max_error": 0.007781982421875,
+      "max_error_vs_fp64": 0.007778167724609375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9779611229896545,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=3072 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=3072 k=2048",
+      "max_error": 0.0038814544677734375,
+      "max_error_vs_fp64": 0.0038814544677734375,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9720051884651184,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=2048 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=2048 k=2048",
+      "max_error": 0.00391387939453125,
+      "max_error_vs_fp64": 0.0039119720458984375,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.96923828125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=2048 k=6144",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=2048 k=6144",
+      "max_error": 0.00757598876953125,
+      "max_error_vs_fp64": 0.0075836181640625,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9814453125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=4096 k=2048",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=4096 k=2048",
+      "max_error": 0.0038805007934570312,
+      "max_error_vs_fp64": 0.0038814544677734375,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.993408203125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=12288 k=4096",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=12288 k=4096",
+      "max_error": 0.007709503173828125,
+      "max_error_vs_fp64": 0.007709503173828125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9825032353401184,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=75968 k=4096",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=75968 k=4096",
+      "max_error": 0.00778961181640625,
+      "max_error_vs_fp64": 0.0077915191650390625,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9860599040985107,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=3072 k=4096",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=3072 k=4096",
+      "max_error": 0.006107330322265625,
+      "max_error_vs_fp64": 0.0061054229736328125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9833984375,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "return",
+      "case": "census decode n=4096 k=6144",
+      "reason": "weight_stream_gemv must be an out= op returning None",
+      "returned": "None",
+      "status": "PASS"
+    },
+    {
+      "case": "census decode n=4096 k=6144",
+      "max_error": 0.0077495574951171875,
+      "max_error_vs_fp64": 0.0077495574951171875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9814453125,
+      "kind": "gemv",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_0 n=256 k=256",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        256
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_0 n=256 k=256",
+      "max_error": 0.0009617805480957031,
+      "max_error_vs_fp64": 0.0009615421295166016,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.9921875,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_0 n=256 k=256",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_0 n=256 k=256",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_0 n=256 k=256",
+      "max_error": 0.0016775131225585938,
+      "max_error_vs_fp64": 0.0016777515411376953,
+      "allowed": 0.0079125,
+      "exact_round_fraction": 0.66796875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_1 n=512 k=512",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        512
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_1 n=512 k=512",
+      "max_error": 0.00046896934509277344,
+      "max_error_vs_fp64": 0.00046896934509277344,
+      "allowed": 0.002053125,
+      "exact_round_fraction": 0.99609375,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_1 n=512 k=512",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_1 n=512 k=512",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_1 n=512 k=512",
+      "max_error": 0.0008203983306884766,
+      "max_error_vs_fp64": 0.0008205175399780273,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.6796875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "decode n=256 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        256
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream decode n=256 k=2048",
+      "max_error": 0.0019516944885253906,
+      "max_error_vs_fp64": 0.0019502639770507812,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.98828125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "decode n=256 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "decode n=256 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias decode n=256 k=2048",
+      "max_error": 0.0039234161376953125,
+      "max_error_vs_fp64": 0.0039234161376953125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.75390625,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "decode n=256 k=3072",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        256
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream decode n=256 k=3072",
+      "max_error": 0.0038299560546875,
+      "max_error_vs_fp64": 0.0038270950317382812,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.98828125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "decode n=256 k=3072",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "decode n=256 k=3072",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias decode n=256 k=3072",
+      "max_error": 0.0077362060546875,
+      "max_error_vs_fp64": 0.007733345031738281,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.765625,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "decode n=512 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        512
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream decode n=512 k=2048",
+      "max_error": 0.0009171962738037109,
+      "max_error_vs_fp64": 0.0009174346923828125,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.98828125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "decode n=512 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "decode n=512 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias decode n=512 k=2048",
+      "max_error": 0.0014734268188476562,
+      "max_error_vs_fp64": 0.0014736652374267578,
+      "allowed": 0.0079125,
+      "exact_round_fraction": 0.66796875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "boundary n=128 (n%64==0)",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        128
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream boundary n=128 (n%64==0)",
+      "max_error": 0.0009427070617675781,
+      "max_error_vs_fp64": 0.0009427070617675781,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 0.984375,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "boundary n=128 (n%64==0)",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "boundary n=128 (n%64==0)",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias boundary n=128 (n%64==0)",
+      "max_error": 0.0014331340789794922,
+      "max_error_vs_fp64": 0.0014333724975585938,
+      "allowed": 0.0079125,
+      "exact_round_fraction": 0.6953125,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "boundary n=64 (n%64==0)",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        64
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream boundary n=64 (n%64==0)",
+      "max_error": 0.0036411285400390625,
+      "max_error_vs_fp64": 0.00363922119140625,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.984375,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "boundary n=64 (n%64==0)",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "boundary n=64 (n%64==0)",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias boundary n=64 (n%64==0)",
+      "max_error": 0.0065708160400390625,
+      "max_error_vs_fp64": 0.00656890869140625,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.71875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        192
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "max_error": 0.00045037269592285156,
+      "max_error_vs_fp64": 0.00045037269592285156,
+      "allowed": 0.002053125,
+      "exact_round_fraction": 1.0,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "max_error": 0.0010023117065429688,
+      "max_error_vs_fp64": 0.0010023117065429688,
+      "allowed": 0.005959375,
+      "exact_round_fraction": 0.7291666865348816,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        128
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "max_error": 0.00351715087890625,
+      "max_error_vs_fp64": 0.00351715087890625,
+      "allowed": 0.015725,
+      "exact_round_fraction": 1.0,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "max_error": 0.00376129150390625,
+      "max_error_vs_fp64": 0.00376129150390625,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.6796875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        3840
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_6 decode n=3840 k=2048",
+      "max_error": 0.0038881301879882812,
+      "max_error_vs_fp64": 0.003887176513671875,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9966145753860474,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_6 decode n=3840 k=2048",
+      "max_error": 0.007171630859375,
+      "max_error_vs_fp64": 0.007171630859375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.7291666865348816,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        3840
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_7 decode n=3840 k=4096",
+      "max_error": 0.0075473785400390625,
+      "max_error_vs_fp64": 0.0075511932373046875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9950520992279053,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_7 decode n=3840 k=4096",
+      "max_error": 0.008268356323242188,
+      "max_error_vs_fp64": 0.008272171020507812,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7169271111488342,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        4096
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream zoo/case_8 decode n=4096 k=3840",
+      "max_error": 0.00640869140625,
+      "max_error_vs_fp64": 0.00641632080078125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.99267578125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias zoo/case_8 decode n=4096 k=3840",
+      "max_error": 0.013456344604492188,
+      "max_error_vs_fp64": 0.013454437255859375,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.724853515625,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=15360 k=3840",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        15360
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=15360 k=3840",
+      "max_error": 0.0077991485595703125,
+      "max_error_vs_fp64": 0.0077953338623046875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9930338263511658,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=15360 k=3840",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=15360 k=3840",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=15360 k=3840",
+      "max_error": 0.013324737548828125,
+      "max_error_vs_fp64": 0.0133209228515625,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7300130128860474,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=131072 k=3840",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        131072
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=131072 k=3840",
+      "max_error": 0.007814407348632812,
+      "max_error_vs_fp64": 0.007818222045898438,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9821014404296875,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=131072 k=3840",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=131072 k=3840",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=131072 k=3840",
+      "max_error": 0.014730453491210938,
+      "max_error_vs_fp64": 0.014726638793945312,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7332687377929688,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=5120 k=3840",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        5120
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=5120 k=3840",
+      "max_error": 0.007389068603515625,
+      "max_error_vs_fp64": 0.0073871612548828125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.992382824420929,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=5120 k=3840",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=5120 k=3840",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=5120 k=3840",
+      "max_error": 0.012516021728515625,
+      "max_error_vs_fp64": 0.012514114379882812,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.738085925579071,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=3840 k=7680",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        3840
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=3840 k=7680",
+      "max_error": 0.007663726806640625,
+      "max_error_vs_fp64": 0.0076656341552734375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9828125238418579,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=3840 k=7680",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=3840 k=7680",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=3840 k=7680",
+      "max_error": 0.013881683349609375,
+      "max_error_vs_fp64": 0.013889312744140625,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7432291507720947,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=9216 k=1536",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        9216
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=9216 k=1536",
+      "max_error": 0.0038957595825195312,
+      "max_error_vs_fp64": 0.0038957595825195312,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9946831464767456,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=9216 k=1536",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=9216 k=1536",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=9216 k=1536",
+      "max_error": 0.007587432861328125,
+      "max_error_vs_fp64": 0.0075893402099609375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.7171223759651184,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=130560 k=1536",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        130560
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=130560 k=1536",
+      "max_error": 0.003902435302734375,
+      "max_error_vs_fp64": 0.0039005279541015625,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9950903654098511,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=130560 k=1536",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=130560 k=1536",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=130560 k=1536",
+      "max_error": 0.0076122283935546875,
+      "max_error_vs_fp64": 0.007611274719238281,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.7250076532363892,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=2560 k=1536",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        2560
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=2560 k=1536",
+      "max_error": 0.0036468505859375,
+      "max_error_vs_fp64": 0.0036458969116210938,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9964843988418579,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=2560 k=1536",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=2560 k=1536",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=2560 k=1536",
+      "max_error": 0.007232666015625,
+      "max_error_vs_fp64": 0.007233619689941406,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.736328125,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=1536 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        1536
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=1536 k=2048",
+      "max_error": 0.0038537979125976562,
+      "max_error_vs_fp64": 0.0038537979125976562,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9947916865348816,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=1536 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=1536 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=1536 k=2048",
+      "max_error": 0.006221771240234375,
+      "max_error_vs_fp64": 0.006221771240234375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.73046875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=1536 k=4608",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        1536
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=1536 k=4608",
+      "max_error": 0.006908416748046875,
+      "max_error_vs_fp64": 0.0069103240966796875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9928385615348816,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=1536 k=4608",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=1536 k=4608",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=1536 k=4608",
+      "max_error": 0.0135498046875,
+      "max_error_vs_fp64": 0.0135498046875,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7278645634651184,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=12288 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        12288
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=12288 k=2048",
+      "max_error": 0.0038967132568359375,
+      "max_error_vs_fp64": 0.0038957595825195312,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9740397334098816,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=12288 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=12288 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=12288 k=2048",
+      "max_error": 0.007554054260253906,
+      "max_error_vs_fp64": 0.0075531005859375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.7205403447151184,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=120832 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        120832
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=120832 k=2048",
+      "max_error": 0.007781982421875,
+      "max_error_vs_fp64": 0.007778167724609375,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9779611229896545,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=120832 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=120832 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=120832 k=2048",
+      "max_error": 0.008314132690429688,
+      "max_error_vs_fp64": 0.008312225341796875,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7233017683029175,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=3072 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        3072
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=3072 k=2048",
+      "max_error": 0.0038814544677734375,
+      "max_error_vs_fp64": 0.0038814544677734375,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.9720051884651184,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=3072 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=3072 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=3072 k=2048",
+      "max_error": 0.00737762451171875,
+      "max_error_vs_fp64": 0.00737762451171875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.7177734375,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=2048 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        2048
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=2048 k=2048",
+      "max_error": 0.00391387939453125,
+      "max_error_vs_fp64": 0.0039119720458984375,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.96923828125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=2048 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=2048 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=2048 k=2048",
+      "max_error": 0.006816864013671875,
+      "max_error_vs_fp64": 0.006816864013671875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.7138671875,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=2048 k=6144",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        2048
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=2048 k=6144",
+      "max_error": 0.00757598876953125,
+      "max_error_vs_fp64": 0.0075836181640625,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9814453125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=2048 k=6144",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=2048 k=6144",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=2048 k=6144",
+      "max_error": 0.01351165771484375,
+      "max_error_vs_fp64": 0.013507843017578125,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.72412109375,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=4096 k=2048",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        4096
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=4096 k=2048",
+      "max_error": 0.0038805007934570312,
+      "max_error_vs_fp64": 0.0038814544677734375,
+      "allowed": 0.015725,
+      "exact_round_fraction": 0.993408203125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=4096 k=2048",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=4096 k=2048",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=4096 k=2048",
+      "max_error": 0.006984710693359375,
+      "max_error_vs_fp64": 0.006985664367675781,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.721923828125,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=12288 k=4096",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        12288
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=12288 k=4096",
+      "max_error": 0.007709503173828125,
+      "max_error_vs_fp64": 0.007709503173828125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9825032353401184,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=12288 k=4096",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=12288 k=4096",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=12288 k=4096",
+      "max_error": 0.01067352294921875,
+      "max_error_vs_fp64": 0.01067352294921875,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7379557490348816,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=75968 k=4096",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        75968
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=75968 k=4096",
+      "max_error": 0.00778961181640625,
+      "max_error_vs_fp64": 0.0077915191650390625,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9860599040985107,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=75968 k=4096",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=75968 k=4096",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=75968 k=4096",
+      "max_error": 0.012937545776367188,
+      "max_error_vs_fp64": 0.012943267822265625,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7309261560440063,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=3072 k=4096",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        3072
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=3072 k=4096",
+      "max_error": 0.006107330322265625,
+      "max_error_vs_fp64": 0.0061054229736328125,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9833984375,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=3072 k=4096",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=3072 k=4096",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=3072 k=4096",
+      "max_error": 0.009754180908203125,
+      "max_error_vs_fp64": 0.009756088256835938,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7330729365348816,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "census decode n=4096 k=6144",
+      "reason": "M=1 linear_stream must return [1, n]",
+      "got": [
+        1,
+        4096
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream census decode n=4096 k=6144",
+      "max_error": 0.0077495574951171875,
+      "max_error_vs_fp64": 0.0077495574951171875,
+      "allowed": 0.03135,
+      "exact_round_fraction": 0.9814453125,
+      "kind": "linear_stream_m1",
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback",
+      "case": "census decode n=4096 k=6144",
+      "reason": "M=1 wrapper did not reproduce the GEMV kernel bit-for-bit (unexpected fallback to the vendor GEMM)",
+      "bit_identical": true,
+      "status": "PASS"
+    },
+    {
+      "kind": "fallback_bias",
+      "case": "census decode n=4096 k=6144",
+      "reason": "bias was not applied as a plain fp16 add to the GEMV row",
+      "status": "PASS"
+    },
+    {
+      "case": "linear_stream+bias census decode n=4096 k=6144",
+      "max_error": 0.014225006103515625,
+      "max_error_vs_fp64": 0.014226913452148438,
+      "allowed": 0.0626,
+      "exact_round_fraction": 0.7353515625,
+      "kind": "linear_stream_m1_bias",
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "prefill M=3 n=256 k=256",
+      "reason": "fallback must preserve the [m, n] GEMM shape",
+      "got": [
+        3,
+        256
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "prefill M=3 n=256 k=256",
+      "max_error": 0.0009326934814453125,
+      "max_error_vs_fp64": 0.0009338855743408203,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 1.0,
+      "kind": "linear_stream_fallback",
+      "m": 3,
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "prefill M=5 n=512 k=512",
+      "reason": "fallback must preserve the [m, n] GEMM shape",
+      "got": [
+        5,
+        512
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "prefill M=5 n=512 k=512",
+      "max_error": 0.0019450187683105469,
+      "max_error_vs_fp64": 0.0019445419311523438,
+      "allowed": 0.0079125,
+      "exact_round_fraction": 0.99609375,
+      "kind": "linear_stream_fallback",
+      "m": 5,
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "M=1 but n=160 (n%64!=0)",
+      "reason": "fallback must preserve the [m, n] GEMM shape",
+      "got": [
+        1,
+        160
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "M=1 but n=160 (n%64!=0)",
+      "max_error": 0.0008559226989746094,
+      "max_error_vs_fp64": 0.0008559226989746094,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 1.0,
+      "kind": "linear_stream_fallback",
+      "m": 1,
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "M=1 but k=250 (k%16!=0)",
+      "reason": "fallback must preserve the [m, n] GEMM shape",
+      "got": [
+        1,
+        256
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "M=1 but k=250 (k%16!=0)",
+      "max_error": 0.0009403228759765625,
+      "max_error_vs_fp64": 0.0009398460388183594,
+      "allowed": 0.00400625,
+      "exact_round_fraction": 1.0,
+      "kind": "linear_stream_fallback",
+      "m": 1,
+      "status": "PASS"
+    },
+    {
+      "kind": "shape",
+      "case": "M=1 but n=3842 (n%64!=0)",
+      "reason": "fallback must preserve the [m, n] GEMM shape",
+      "got": [
+        1,
+        3842
+      ],
+      "status": "PASS"
+    },
+    {
+      "case": "M=1 but n=3842 (n%64!=0)",
+      "max_error": 0.0019311904907226562,
+      "max_error_vs_fp64": 0.0019311904907226562,
+      "allowed": 0.0079125,
+      "exact_round_fraction": 0.9958354830741882,
+      "kind": "linear_stream_fallback",
+      "m": 1,
+      "status": "PASS"
+    },
+    {
+      "kind": "rejection",
+      "case": "n=100 (n%64!=0)",
+      "raised": "RuntimeError",
+      "message": "weight_stream_gemv rejected the call (status=3: TECOOPS_STATUS_BAD_PARAM); requires a contiguous fp16 [k] x [n, k] pair with n % 64 == 0 and k % 16 == 0; the output tensor was not written.",
+      "sentinel_untouched": true,
+      "reason": "unsupported shape must raise RuntimeError from the binding (TORCH_CHECK on the C ABI status) and must not write the output tensor",
+      "status": "PASS"
+    },
+    {
+      "kind": "rejection",
+      "case": "n=160 (n%64!=0)",
+      "raised": "RuntimeError",
+      "message": "weight_stream_gemv rejected the call (status=3: TECOOPS_STATUS_BAD_PARAM); requires a contiguous fp16 [k] x [n, k] pair with n % 64 == 0 and k % 16 == 0; the output tensor was not written.",
+      "sentinel_untouched": true,
+      "reason": "unsupported shape must raise RuntimeError from the binding (TORCH_CHECK on the C ABI status) and must not write the output tensor",
+      "status": "PASS"
+    },
+    {
+      "kind": "rejection",
+      "case": "k=250 (k%16!=0)",
+      "raised": "RuntimeError",
+      "message": "weight_stream_gemv rejected the call (status=3: TECOOPS_STATUS_BAD_PARAM); requires a contiguous fp16 [k] x [n, k] pair with n % 64 == 0 and k % 16 == 0; the output tensor was not written.",
+      "sentinel_untouched": true,
+      "reason": "unsupported shape must raise RuntimeError from the binding (TORCH_CHECK on the C ABI status) and must not write the output tensor",
+      "status": "PASS"
+    },
+    {
+      "kind": "rejection",
+      "case": "n=3842 (n%64!=0)",
+      "raised": "RuntimeError",
+      "message": "weight_stream_gemv rejected the call (status=3: TECOOPS_STATUS_BAD_PARAM); requires a contiguous fp16 [k] x [n, k] pair with n % 64 == 0 and k % 16 == 0; the output tensor was not written.",
+      "sentinel_untouched": true,
+      "reason": "unsupported shape must raise RuntimeError from the binding (TORCH_CHECK on the C ABI status) and must not write the output tensor",
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_0 n=256 k=256",
+      "round_exact_gemv": 0.9921875,
+      "round_exact_gemm": 0.99609375,
+      "gemv_vs_gemm_exact": 0.99609375,
+      "max_abs_diff": 7.62939453125e-06,
+      "round_exact_gemv_bias": 0.66796875,
+      "round_exact_gemm_bias": 1.0,
+      "gemv_vs_gemm_exact_bias": 0.66796875,
+      "max_abs_diff_bias": 0.001953125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_1 n=512 k=512",
+      "round_exact_gemv": 0.99609375,
+      "round_exact_gemm": 0.99609375,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.6796875,
+      "round_exact_gemm_bias": 0.9921875,
+      "gemv_vs_gemm_exact_bias": 0.6796875,
+      "max_abs_diff_bias": 0.0009765625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "decode n=256 k=2048",
+      "round_exact_gemv": 0.98828125,
+      "round_exact_gemm": 0.98828125,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.75390625,
+      "round_exact_gemm_bias": 0.99609375,
+      "gemv_vs_gemm_exact_bias": 0.7578125,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "decode n=256 k=3072",
+      "round_exact_gemv": 0.98828125,
+      "round_exact_gemm": 0.98828125,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.765625,
+      "round_exact_gemm_bias": 0.99609375,
+      "gemv_vs_gemm_exact_bias": 0.76953125,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "decode n=512 k=2048",
+      "round_exact_gemv": 0.98828125,
+      "round_exact_gemm": 0.98828125,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.66796875,
+      "round_exact_gemm_bias": 0.98046875,
+      "gemv_vs_gemm_exact_bias": 0.671875,
+      "max_abs_diff_bias": 0.001953125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "boundary n=128 (n%64==0)",
+      "round_exact_gemv": 0.984375,
+      "round_exact_gemm": 0.9921875,
+      "gemv_vs_gemm_exact": 0.9921875,
+      "max_abs_diff": 0.000244140625,
+      "round_exact_gemv_bias": 0.6953125,
+      "round_exact_gemm_bias": 0.9921875,
+      "gemv_vs_gemm_exact_bias": 0.6875,
+      "max_abs_diff_bias": 0.001953125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "boundary n=64 (n%64==0)",
+      "round_exact_gemv": 0.984375,
+      "round_exact_gemm": 0.984375,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.71875,
+      "round_exact_gemm_bias": 1.0,
+      "gemv_vs_gemm_exact_bias": 0.71875,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_3 n=192 k=48 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "round_exact_gemv": 1.0,
+      "round_exact_gemm": 1.0,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.7291666865348816,
+      "round_exact_gemm_bias": 1.0,
+      "gemv_vs_gemm_exact_bias": 0.7291666865348816,
+      "max_abs_diff_bias": 0.001953125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_5 n=128 k=2032 (10/22 review \u8981\u6c42\u7684\u5bf9\u9f50\u56de\u5f52)",
+      "round_exact_gemv": 1.0,
+      "round_exact_gemm": 1.0,
+      "gemv_vs_gemm_exact": 1.0,
+      "max_abs_diff": 0.0,
+      "round_exact_gemv_bias": 0.6796875,
+      "round_exact_gemm_bias": 0.9765625,
+      "gemv_vs_gemm_exact_bias": 0.6875,
+      "max_abs_diff_bias": 0.00390625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "round_exact_gemv": 0.9966145753860474,
+      "round_exact_gemm": 0.996874988079071,
+      "gemv_vs_gemm_exact": 0.999218761920929,
+      "max_abs_diff": 0.000244140625,
+      "round_exact_gemv_bias": 0.7291666865348816,
+      "round_exact_gemm_bias": 0.9955729246139526,
+      "gemv_vs_gemm_exact_bias": 0.729687511920929,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "round_exact_gemv": 0.9950520992279053,
+      "round_exact_gemm": 0.9950520992279053,
+      "gemv_vs_gemm_exact": 0.999218761920929,
+      "max_abs_diff": 0.0001220703125,
+      "round_exact_gemv_bias": 0.7169271111488342,
+      "round_exact_gemm_bias": 0.9940103888511658,
+      "gemv_vs_gemm_exact_bias": 0.7166666388511658,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "round_exact_gemv": 0.99267578125,
+      "round_exact_gemm": 0.991455078125,
+      "gemv_vs_gemm_exact": 0.99853515625,
+      "max_abs_diff": 0.00048828125,
+      "round_exact_gemv_bias": 0.724853515625,
+      "round_exact_gemm_bias": 0.9931640625,
+      "gemv_vs_gemm_exact_bias": 0.7255859375,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=15360 k=3840",
+      "round_exact_gemv": 0.9930338263511658,
+      "round_exact_gemm": 0.9928385615348816,
+      "gemv_vs_gemm_exact": 0.9984375238418579,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.7300130128860474,
+      "round_exact_gemm_bias": 0.9932942986488342,
+      "gemv_vs_gemm_exact_bias": 0.7304036617279053,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=131072 k=3840",
+      "round_exact_gemv": 0.9821014404296875,
+      "round_exact_gemm": 0.9820709228515625,
+      "gemv_vs_gemm_exact": 0.9982528686523438,
+      "max_abs_diff": 0.0078125,
+      "round_exact_gemv_bias": 0.7332687377929688,
+      "round_exact_gemm_bias": 0.9821624755859375,
+      "gemv_vs_gemm_exact_bias": 0.7346038818359375,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=5120 k=3840",
+      "round_exact_gemv": 0.992382824420929,
+      "round_exact_gemm": 0.991992175579071,
+      "gemv_vs_gemm_exact": 0.997265636920929,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.738085925579071,
+      "round_exact_gemm_bias": 0.9935547113418579,
+      "gemv_vs_gemm_exact_bias": 0.7388671636581421,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=3840 k=7680",
+      "round_exact_gemv": 0.9828125238418579,
+      "round_exact_gemm": 0.9830729365348816,
+      "gemv_vs_gemm_exact": 0.9973958134651184,
+      "max_abs_diff": 0.0009765625,
+      "round_exact_gemv_bias": 0.7432291507720947,
+      "round_exact_gemm_bias": 0.9830729365348816,
+      "gemv_vs_gemm_exact_bias": 0.7455729246139526,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=9216 k=1536",
+      "round_exact_gemv": 0.9946831464767456,
+      "round_exact_gemm": 0.9946831464767456,
+      "gemv_vs_gemm_exact": 0.9995659589767456,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.7171223759651184,
+      "round_exact_gemm_bias": 0.9942491054534912,
+      "gemv_vs_gemm_exact_bias": 0.7169053554534912,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=130560 k=1536",
+      "round_exact_gemv": 0.9950903654098511,
+      "round_exact_gemm": 0.9951516389846802,
+      "gemv_vs_gemm_exact": 0.9987208843231201,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.7250076532363892,
+      "round_exact_gemm_bias": 0.9950597286224365,
+      "gemv_vs_gemm_exact_bias": 0.7257429361343384,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=2560 k=1536",
+      "round_exact_gemv": 0.9964843988418579,
+      "round_exact_gemm": 0.9964843988418579,
+      "gemv_vs_gemm_exact": 0.998046875,
+      "max_abs_diff": 0.00048828125,
+      "round_exact_gemv_bias": 0.736328125,
+      "round_exact_gemm_bias": 0.9976562261581421,
+      "gemv_vs_gemm_exact_bias": 0.736328125,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=1536 k=2048",
+      "round_exact_gemv": 0.9947916865348816,
+      "round_exact_gemm": 0.9947916865348816,
+      "gemv_vs_gemm_exact": 0.998046875,
+      "max_abs_diff": 0.00048828125,
+      "round_exact_gemv_bias": 0.73046875,
+      "round_exact_gemm_bias": 0.99609375,
+      "gemv_vs_gemm_exact_bias": 0.7311198115348816,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=1536 k=4608",
+      "round_exact_gemv": 0.9928385615348816,
+      "round_exact_gemm": 0.9928385615348816,
+      "gemv_vs_gemm_exact": 0.9993489384651184,
+      "max_abs_diff": 1.9073486328125e-06,
+      "round_exact_gemv_bias": 0.7278645634651184,
+      "round_exact_gemm_bias": 0.9850260615348816,
+      "gemv_vs_gemm_exact_bias": 0.7311198115348816,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=12288 k=2048",
+      "round_exact_gemv": 0.9740397334098816,
+      "round_exact_gemm": 0.97412109375,
+      "gemv_vs_gemm_exact": 0.99853515625,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.7205403447151184,
+      "round_exact_gemm_bias": 0.976806640625,
+      "gemv_vs_gemm_exact_bias": 0.723876953125,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=120832 k=2048",
+      "round_exact_gemv": 0.9779611229896545,
+      "round_exact_gemm": 0.9778783917427063,
+      "gemv_vs_gemm_exact": 0.9987006783485413,
+      "max_abs_diff": 0.0078125,
+      "round_exact_gemv_bias": 0.7233017683029175,
+      "round_exact_gemm_bias": 0.9778783917427063,
+      "gemv_vs_gemm_exact_bias": 0.7264135479927063,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=3072 k=2048",
+      "round_exact_gemv": 0.9720051884651184,
+      "round_exact_gemm": 0.9710286259651184,
+      "gemv_vs_gemm_exact": 0.9986979365348816,
+      "max_abs_diff": 0.0078125,
+      "round_exact_gemv_bias": 0.7177734375,
+      "round_exact_gemm_bias": 0.97265625,
+      "gemv_vs_gemm_exact_bias": 0.7249348759651184,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=2048 k=2048",
+      "round_exact_gemv": 0.96923828125,
+      "round_exact_gemm": 0.96923828125,
+      "gemv_vs_gemm_exact": 0.99853515625,
+      "max_abs_diff": 0.000244140625,
+      "round_exact_gemv_bias": 0.7138671875,
+      "round_exact_gemm_bias": 0.970703125,
+      "gemv_vs_gemm_exact_bias": 0.71728515625,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=2048 k=6144",
+      "round_exact_gemv": 0.9814453125,
+      "round_exact_gemm": 0.9814453125,
+      "gemv_vs_gemm_exact": 0.9990234375,
+      "max_abs_diff": 0.00048828125,
+      "round_exact_gemv_bias": 0.72412109375,
+      "round_exact_gemm_bias": 0.9833984375,
+      "gemv_vs_gemm_exact_bias": 0.72607421875,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=4096 k=2048",
+      "round_exact_gemv": 0.993408203125,
+      "round_exact_gemm": 0.99365234375,
+      "gemv_vs_gemm_exact": 0.99853515625,
+      "max_abs_diff": 0.0009765625,
+      "round_exact_gemv_bias": 0.721923828125,
+      "round_exact_gemm_bias": 0.994384765625,
+      "gemv_vs_gemm_exact_bias": 0.72314453125,
+      "max_abs_diff_bias": 0.0078125,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=12288 k=4096",
+      "round_exact_gemv": 0.9825032353401184,
+      "round_exact_gemm": 0.9825032353401184,
+      "gemv_vs_gemm_exact": 0.9984537959098816,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.7379557490348816,
+      "round_exact_gemm_bias": 0.9837239384651184,
+      "gemv_vs_gemm_exact_bias": 0.7399088740348816,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=75968 k=4096",
+      "round_exact_gemv": 0.9860599040985107,
+      "round_exact_gemm": 0.9859941005706787,
+      "gemv_vs_gemm_exact": 0.9980518221855164,
+      "max_abs_diff": 0.00390625,
+      "round_exact_gemv_bias": 0.7309261560440063,
+      "round_exact_gemm_bias": 0.9863889813423157,
+      "gemv_vs_gemm_exact_bias": 0.732413649559021,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=3072 k=4096",
+      "round_exact_gemv": 0.9833984375,
+      "round_exact_gemm": 0.9837239384651184,
+      "gemv_vs_gemm_exact": 0.9977213740348816,
+      "max_abs_diff": 0.00048828125,
+      "round_exact_gemv_bias": 0.7330729365348816,
+      "round_exact_gemm_bias": 0.9860026240348816,
+      "gemv_vs_gemm_exact_bias": 0.7389323115348816,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    },
+    {
+      "kind": "gemv_vs_gemm",
+      "case": "census decode n=4096 k=6144",
+      "round_exact_gemv": 0.9814453125,
+      "round_exact_gemm": 0.980712890625,
+      "gemv_vs_gemm_exact": 0.99853515625,
+      "max_abs_diff": 0.0078125,
+      "round_exact_gemv_bias": 0.7353515625,
+      "round_exact_gemm_bias": 0.979736328125,
+      "gemv_vs_gemm_exact_bias": 0.739501953125,
+      "max_abs_diff_bias": 0.015625,
+      "status": "PASS"
+    }
+  ],
+  "census_shapes": [
+    {
+      "n": 3840,
+      "k": 2048,
+      "case": "zoo/case_6 decode n=3840 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 0,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              3840,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 15360,
+      "k": 3840,
+      "case": "census decode n=15360 k=3840",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 1,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              3840
+            ],
+            "layer": "MergedColumnParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              15360,
+              3840
+            ],
+            "weight_stride": [
+              3840,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 131072,
+      "k": 3840,
+      "case": "census decode n=131072 k=3840",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 2,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              3840
+            ],
+            "layer": "ParallelLMHead",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              131072,
+              3840
+            ],
+            "weight_stride": [
+              3840,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 4096,
+      "k": 3840,
+      "case": "zoo/case_8 decode n=4096 k=3840",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 3,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              3840
+            ],
+            "layer": "QKVParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              4096,
+              3840
+            ],
+            "weight_stride": [
+              3840,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 5120,
+      "k": 3840,
+      "case": "census decode n=5120 k=3840",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 4,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              3840
+            ],
+            "layer": "QKVParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              5120,
+              3840
+            ],
+            "weight_stride": [
+              3840,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 3840,
+      "k": 4096,
+      "case": "zoo/case_7 decode n=3840 k=4096",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 5,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              4096
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              3840,
+              4096
+            ],
+            "weight_stride": [
+              4096,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 3840,
+      "k": 7680,
+      "case": "census decode n=3840 k=7680",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr3.json",
+          "model": "gemma-4-12B-it",
+          "row_index": 6,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              7680
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              3840,
+              7680
+            ],
+            "weight_stride": [
+              7680,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 9216,
+      "k": 1536,
+      "case": "census decode n=9216 k=1536",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr4.json",
+          "model": "MiniCPM5-1B",
+          "row_index": 0,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              1536
+            ],
+            "layer": "MergedColumnParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              9216,
+              1536
+            ],
+            "weight_stride": [
+              1536,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 130560,
+      "k": 1536,
+      "case": "census decode n=130560 k=1536",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr4.json",
+          "model": "MiniCPM5-1B",
+          "row_index": 1,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              1536
+            ],
+            "layer": "ParallelLMHead",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              130560,
+              1536
+            ],
+            "weight_stride": [
+              1536,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 2560,
+      "k": 1536,
+      "case": "census decode n=2560 k=1536",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr4.json",
+          "model": "MiniCPM5-1B",
+          "row_index": 2,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              1536
+            ],
+            "layer": "QKVParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              2560,
+              1536
+            ],
+            "weight_stride": [
+              1536,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 1536,
+      "k": 2048,
+      "case": "census decode n=1536 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr4.json",
+          "model": "MiniCPM5-1B",
+          "row_index": 3,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              1536,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 1536,
+      "k": 4608,
+      "case": "census decode n=1536 k=4608",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr4.json",
+          "model": "MiniCPM5-1B",
+          "row_index": 4,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              4608
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              1536,
+              4608
+            ],
+            "weight_stride": [
+              4608,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 12288,
+      "k": 2048,
+      "case": "census decode n=12288 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr5.json",
+          "model": "Hy-MT2-1.8B",
+          "row_index": 0,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "MergedColumnParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              12288,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 120832,
+      "k": 2048,
+      "case": "census decode n=120832 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr5.json",
+          "model": "Hy-MT2-1.8B",
+          "row_index": 1,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "ParallelLMHead",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              120832,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 3072,
+      "k": 2048,
+      "case": "census decode n=3072 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr5.json",
+          "model": "Hy-MT2-1.8B",
+          "row_index": 2,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "QKVParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              3072,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 2048,
+      "k": 2048,
+      "case": "census decode n=2048 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr5.json",
+          "model": "Hy-MT2-1.8B",
+          "row_index": 3,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              2048,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 2048,
+      "k": 6144,
+      "case": "census decode n=2048 k=6144",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr5.json",
+          "model": "Hy-MT2-1.8B",
+          "row_index": 4,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              6144
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              2048,
+              6144
+            ],
+            "weight_stride": [
+              6144,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 4096,
+      "k": 2048,
+      "case": "census decode n=4096 k=2048",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr6.json",
+          "model": "InternVL3_5-8B",
+          "row_index": 0,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              2048
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              4096,
+              2048
+            ],
+            "weight_stride": [
+              2048,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 12288,
+      "k": 4096,
+      "case": "census decode n=12288 k=4096",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr6.json",
+          "model": "InternVL3_5-8B",
+          "row_index": 1,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              4096
+            ],
+            "layer": "MergedColumnParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              12288,
+              4096
+            ],
+            "weight_stride": [
+              4096,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 75968,
+      "k": 4096,
+      "case": "census decode n=75968 k=4096",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr6.json",
+          "model": "InternVL3_5-8B",
+          "row_index": 2,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              4096
+            ],
+            "layer": "ParallelLMHead",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              75968,
+              4096
+            ],
+            "weight_stride": [
+              4096,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 3072,
+      "k": 4096,
+      "case": "census decode n=3072 k=4096",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr6.json",
+          "model": "InternVL3_5-8B",
+          "row_index": 3,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              4096
+            ],
+            "layer": "QKVParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              3072,
+              4096
+            ],
+            "weight_stride": [
+              4096,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "n": 4096,
+      "k": 6144,
+      "case": "census decode n=4096 k=6144",
+      "provenance": [
+        {
+          "source": "/root/tmpwork/fix-20261024/gemv-census/pr6.json",
+          "model": "InternVL3_5-8B",
+          "row_index": 4,
+          "observation": {
+            "bias": false,
+            "dtype": "torch.float16",
+            "input_shape": [
+              1,
+              6144
+            ],
+            "layer": "RowParallelLinear",
+            "provenance": "observed SDAA M=1 forward; diagnostic process only",
+            "weight_shape": [
+              4096,
+              6144
+            ],
+            "weight_stride": [
+              6144,
+              1
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

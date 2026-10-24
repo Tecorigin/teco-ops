@@ -153,6 +153,17 @@ tecoopsStatus_t tecoopsRmsNorm(
     int hidden_size,
     float eps);
 
+// M=1 decode weight-streaming GEMV: y[n] = sum_k x[k] * w[n][k].
+// x: [K] fp16, w: [N, K] fp16 row-major, y: [N] fp16.  fp32 accumulation.
+// Separate entry point and separate kernel: no delivered operator changes.
+tecoopsStatus_t tecoopsWeightStreamGemv(
+    tecoopsHandle_t handle,
+    const void *x,
+    const void *w,
+    void *y,
+    int n,
+    int k);
+
 tecoopsStatus_t tecoopsFlashAttention(tecoopsHandle_t handle,
                                       int max_seqlen_q, int max_seqlen_k,
                                       int max_block_num, const int *q_seq_lens,
