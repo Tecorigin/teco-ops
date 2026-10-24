@@ -96,6 +96,70 @@ void rms_norm_torch(
                    num_tokens, hidden_size, static_cast<float>(eps));
 }
 
+torch::Tensor reduce_variance_torch(
+    torch::Tensor input, int64_t axis, int64_t correction) {
+    tecoopsHandle_t handle = getGlobalHandle();
+    // Keep the launch on the caller's current SDAA stream, like the other pybind
+    // entries in this file: in a non-default stream the kernel must stay ordered
+    // with the PyTorch ops that produced `input` and consume the result.
+    tecoopsSetStream(handle, torch::sdaa::getCurrentSDAAStream());
+    int ndim = input.dim();
+    int axis_i = static_cast<int>(axis);
+    int correction_i = static_cast<int>(correction);
+
+    // fp32 only: the UAL dispatcher has no fp16 kernel for this operator --
+    // findReduceVarianceBranch() (teco/ual/ops/reduce_variance/find_reduce_variance.cpp)
+    // logs and leaves algo = 0 for any non-FLOAT dtype, so an fp16 call would
+    // silently run the fp32 kernel over half-precision bits. Fail closed instead.
+    TORCH_CHECK(input.scalar_type() == torch::kFloat32,
+                "reduce_variance: input must be float32; this operator has no fp16 "
+                "kernel (find_reduce_variance.cpp selects the fp32 kernel for "
+                "non-float dtypes)");
+    // C++ ATen has no is_sdaa(): SDAA is the PrivateUse1 backend, so the strict
+    // device check is is_privateuseone() (the same predicate as the
+    // flash_attention binding). Negating is_cpu() would also admit any other
+    // PrivateUse1-backend tensor.
+    TORCH_CHECK(input.is_privateuseone(),
+                "reduce_variance: input must be an SDAA (PrivateUse1) device "
+                "tensor, not a CPU/host tensor");
+    TORCH_CHECK(input.is_contiguous(), "reduce_variance: input must be contiguous");
+    TORCH_CHECK(axis_i >= 0 && axis_i < ndim,
+                "reduce_variance: axis out of range, got ", axis, " for ", ndim, "-D input");
+    TORCH_CHECK(correction_i == 0 || correction_i == 1,
+                "reduce_variance: correction must be 0 or 1, got ", correction);
+
+    std::vector<int> x_dims(ndim);
+    std::vector<int> y_dims(ndim);
+    for (int i = 0; i < ndim; i++) {
+        x_dims[i] = static_cast<int>(input.size(i));
+        y_dims[i] = (i == axis_i) ? 1 : static_cast<int>(input.size(i));
+    }
+
+    // fp32-only contract (checked above): the descriptors are always float32.
+    tecoopsDataType_t dtype = TECOOPS_DATA_FLOAT;
+    tecoopsTensorDescriptor_t xDesc = nullptr;
+    tecoopsTensorDescriptor_t yDesc = nullptr;
+    tecoopsCreateTensorDescriptor(&xDesc);
+    tecoopsCreateTensorDescriptor(&yDesc);
+    tecoopsSetTensorNdDescriptor(xDesc, dtype, ndim, x_dims.data(), nullptr);
+    tecoopsSetTensorNdDescriptor(yDesc, dtype, ndim, y_dims.data(), nullptr);
+
+    // The C op writes y with the reduced axis kept at extent 1 (keepdim semantics,
+    // matching the zoo cases); squeeze it away before returning so the Python entry
+    // matches torch.var(..., keepdim=False).
+    std::vector<int64_t> y_sizes(y_dims.begin(), y_dims.end());
+    auto y = torch::empty(y_sizes, input.options());
+    tecoopsStatus_t status = tecoopsReduceVariance(handle, axis_i, correction_i,
+                                                   xDesc, input.data_ptr(),
+                                                   yDesc, y.data_ptr());
+    tecoopsDestroyTensorDescriptor(xDesc);
+    tecoopsDestroyTensorDescriptor(yDesc);
+    TORCH_CHECK(status == TECOOPS_STATUS_SUCCESS,
+                "reduce_variance: tecoopsReduceVariance failed, status = ",
+                static_cast<int>(status));
+    return y.squeeze(axis_i);
+}
+
 void flash_attn_varlen_func_torch(
     torch::Tensor q,
     torch::Tensor k,
@@ -210,6 +274,7 @@ PYBIND11_MODULE(_torch_ext, m) {
     m.def("morton3D_invert", &morton3D_invert_torch, "morton3D_invert (SDAA)");
     m.def("reshape_and_cache", &reshape_and_cache_torch, "reshape_and_cache (SDAA)");
     m.def("rms_norm", &rms_norm_torch, "rms_norm (SDAA)");
+    m.def("reduce_variance", &reduce_variance_torch, "reduce_variance (SDAA)");
     m.def("flash_attn_varlen_func", &flash_attn_varlen_func_torch, "flash_attn_varlen_func (SDAA)");
     m.def("causal_conv1d_fn_torch", &causal_conv1d_fn_torch, "causal_conv1d_fn_torch (SDAA)");
 }

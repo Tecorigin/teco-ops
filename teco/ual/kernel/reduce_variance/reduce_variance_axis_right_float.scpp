@@ -44,6 +44,13 @@ using namespace sdaa;  // NOLINT
 #define EXDBF buf_dbflag = 1 - buf_dbflag
 
 // caculate_large_variance
+//
+// Stride contract: `aligned_col` is the row stride of `x`; the dispatch layer
+// rounds the per-SPE column budget up to 16 and floors it at 16, so it is always
+// a non-zero multiple of 16 and never smaller than `cur_col`. The 16-lane loop
+// stops at `col_idx <= cur_col - 16`, so it reads at most `cur_col` columns of a
+// row and cannot run past the row end; the scalar tail right after it covers the
+// `cur_col % 16` remainder. Keep this bound if the vector width ever changes.
 __device__ static __always_inline void caculate_large_variance(float* x, float* mean, float* square,
                                                                const int cur_col, const int cur_row,
                                                                const int aligned_col) {
@@ -74,40 +81,53 @@ __device__ static __always_inline void caculate_large_variance(float* x, float* 
 }
 
 // caculate_tiny_variance
+// [c40-rv] always run the SIMD main loop.  The old code fell back to a fully scalar
+// double-precision loop whenever the row width was not a multiple of 16, which is
+// exactly case_2 (matrix_col == 200); that scalar fp64 chain dominated the kernel.
+// The 200-float row stride is only 32-byte aligned, hence the unaligned loads.
+// [c44-rv] Numerical note (expected range, not a bug): the SIMD path reorders the
+// fp32 accumulation (16 lanes accumulate independently, then the lane sums are folded
+// into fp64 in lane order), whereas the removed scalar fallback accumulated every
+// element sequentially in fp64.  The result can therefore drift by up to the last 1
+// ULP of fp32 versus the old path.  Observed on zoo case_2: 136/1080 elements differ,
+// max_abs 1.192092896e-07 (1 ULP), max_rel 1.04131e-07 — far below the documented
+// DIFF3_MAX gate of 1e-6 (error_num = 0, ~9.6x margin).  If a future regression shows
+// deviations beyond ~1 ULP / 1e-6 here, treat it as a bug, not this reorder.
+// [c44-rv] Width invariants: average_col = matrix_col >= 2 in this branch (the
+// interface layer short-circuits dimA[axis] == 1 to memset), so the column width is
+// never 0; the SIMD loop only loads 16-wide vectors while col_idx <= average_col - 16
+// and the scalar residual loop covers exactly [0, average_col), so nothing is read
+// past the end of a row regardless of 16-alignment (loads are loadu here).
 __device__ static __always_inline void caculate_tiny_variance(float* x, float* y, const int cur_row,
                                                               const int average_col,
                                                               const int correction) {
     int row_idx, col_idx;
-    double v_mean, v_square, value, variance;
+    double v_mean, v_square, variance;
+    float value;
 
-    if (average_col % 16 == 0) {
+    for (row_idx = 0; row_idx < cur_row; ++row_idx) {
+        const float* xrow = x + row_idx * average_col;
         floatv16 vf_x, vf_mean, vf_square;
-        for (row_idx = 0; row_idx < cur_row; ++row_idx) {
-            vf_mean = 0.0f, vf_square = 0.0f;
-            v_mean = 0.0f, v_square = 0.0f;
-            for (col_idx = 0; col_idx <= average_col - 16; col_idx += 16) {
-                simd_load(vf_x, x + row_idx * average_col + col_idx);
-                vf_mean += vf_x;
-                vf_square += vf_x * vf_x;
-            }
-            for (int i = 0; i < 16; ++i) {
-                v_mean += vf_mean[i];
-                v_square += vf_square[i];
-            }
-            variance = v_square - (v_mean / average_col * v_mean);
-            y[row_idx] = (float)(variance / (average_col - correction));  // NOLINT
+        vf_mean = 0.0f;
+        vf_square = 0.0f;
+        for (col_idx = 0; col_idx <= average_col - 16; col_idx += 16) {
+            simd_loadu(vf_x, xrow + col_idx);
+            vf_mean += vf_x;
+            vf_square += vf_x * vf_x;
         }
-    } else {
-        for (row_idx = 0; row_idx < cur_row; ++row_idx) {
-            v_mean = 0.0f, v_square = 0.0f;
-            for (col_idx = 0; col_idx < average_col; ++col_idx) {
-                value = x[row_idx * average_col + col_idx];
-                v_mean += value;
-                v_square += value * value;
-            }
-            variance = v_square - (v_mean / average_col * v_mean);
-            y[row_idx] = (float)(variance / (average_col - correction));  // NOLINT
+        v_mean = 0.0;
+        v_square = 0.0;
+        for (int i = 0; i < 16; ++i) {
+            v_mean += (double)vf_mean[i];
+            v_square += (double)vf_square[i];
         }
+        for (; col_idx < average_col; ++col_idx) {
+            value = xrow[col_idx];
+            v_mean += (double)value;
+            v_square += (double)value * (double)value;
+        }
+        variance = v_square - (v_mean / average_col * v_mean);
+        y[row_idx] = (float)(variance / (average_col - correction));
     }
 }
 

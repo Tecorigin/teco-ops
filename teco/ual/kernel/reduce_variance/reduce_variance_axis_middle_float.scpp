@@ -124,10 +124,22 @@ __global__ void teco_slave_reduce_variance_axis_middle_float(ReduceVarianceArgs 
     int row_per_loop = 224;
     if (row_per_loop > matrix_row)
         row_per_loop = (matrix_row + 15) / 16 * 16;
-    const int col_per_loop = 224;
+    // [c40-rv] the batch dim (matrix_num) alone starves the SPE array: case_1 has
+    // matrix_num == 3 => only 3 of 32 SPEs run.  Split the column range as well, so
+    // that one SPE owns a complete (batch, column-slab) reduction (no cross-SPE
+    // combine needed), and the SPE array saturates.
+    // [c44-rv] col_per_loop is a compile-time 64 (16-aligned), so the per-SPE column
+    // width is never 0: total_items = matrix_num * ceil(matrix_col / 64) > 0 whenever
+    // the op runs (the interface layer short-circuits dimA[axis]==1 to memset), and
+    // cur_col = MIN(col_per_loop, matrix_col - _col) >= 1 inside the item loop.  The
+    // residual slab (matrix_col % 64 != 0) takes the repack path below; see the
+    // [c44-rv] note there for the no-OOB argument.
+    const int col_per_loop = 64;
+    const int num_col_blocks = (matrix_col + col_per_loop - 1) / col_per_loop;
+    const int total_items = matrix_num * num_col_blocks;
 
     const int blocksize = row_per_loop * col_per_loop * sizeof(float);
-    if (tid >= matrix_num)
+    if (tid >= total_items)
         return;
 
     float* tmpbuf = (float*)rt_spm_malloc(col_per_loop * sizeof(float) * 4);  // NOLINT
@@ -146,8 +158,9 @@ __global__ void teco_slave_reduce_variance_axis_middle_float(ReduceVarianceArgs 
 
     Stride stride;
     MemcpyHandle stride_handle(&stride);
-    for (_num = tid; _num < matrix_num; _num += spe_num) {
-        for (_col = 0; _col < matrix_col; _col += col_per_loop) {
+    for (int item = tid; item < total_items; item += spe_num) {
+        _num = item / num_col_blocks;
+        _col = (item - _num * num_col_blocks) * col_per_loop;
             memset(meanbuf, 0.0f, col_per_loop * sizeof(float));
             memset(squarebuf, 0.0f, col_per_loop * sizeof(float));
             memset(ybuf, 0.0f, col_per_loop * sizeof(float));
@@ -168,7 +181,18 @@ __global__ void teco_slave_reduce_variance_axis_middle_float(ReduceVarianceArgs 
                 memcpy_wait(stride_handle);
 
                 aligned_col = cur_col;
-                // xbuf data alignment
+                // xbuf data alignment (residual/unaligned column path).
+                // [c44-rv] The last column slab has cur_col = matrix_col % col_per_loop,
+                // which is not a multiple of 16 in general (case_1: matrix_col=600,
+                // 600 % 64 = 40).  Rows are then repacked from stride cur_col to stride
+                // col_per_loop:
+                //  - xbuf is row_per_loop * col_per_loop floats, so both the source
+                //    (m * cur_col) and destination (m * col_per_loop) ranges stay in
+                //    bounds for m < cur_row <= row_per_loop;
+                //  - the padded tail [cur_col, col_per_loop) is never read (the SIMD
+                //    loop needs col_idx + 16 <= cur_col; the scalar residual loop stops
+                //    at cur_col).  Column width is never 0 and there is no OOB after
+                //    rounding.
                 if (aligned_col % 16 != 0) {
                     for (int m = cur_row - 1; m >= 0; m--) {
                         memcpy(tmpbuf, xbuf + m * cur_col, cur_col * sizeof(float));
@@ -199,7 +223,6 @@ __global__ void teco_slave_reduce_variance_axis_middle_float(ReduceVarianceArgs 
             memcpy_async(y + _num * matrix_col + _col, ybuf, cur_col * sizeof(float),
                          MemcpySpmToGlobal, stride_handle);
             memcpy_wait(stride_handle);
-        }
     }
     rt_spm_free(xbuf);
     rt_spm_free(tmpbuf);

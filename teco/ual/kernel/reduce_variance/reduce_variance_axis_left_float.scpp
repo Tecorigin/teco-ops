@@ -124,7 +124,17 @@ __global__ void teco_slave_reduce_variance_axis_left_float(ReduceVarianceArgs ar
         row_per_loop = (matrix_row + 15) / 16 * 16;
     const int col_per_loop = 224;
 
-    int average_col = MAX(matrix_col / spe_num / 16 * 16, 16);
+    // [c40-rv] round the per-SPE column budget UP to a 16-float boundary instead of
+    // truncating it, so each strided DMA section is as wide as the SPE budget allows.
+    // case_0: matrix_col=1800, spe_num=32 -> 57 -> 64 floats (256 B/row), was 48 (192 B).
+    // [c44-rv] Alignment invariants (comment-only, no behaviour change):
+    //  - the MAX(..., 16) floor guarantees average_col >= 16, i.e. the per-SPE column
+    //    width is never 0 even when matrix_col < spe_num;
+    //  - average_col <= col_per_loop (224), so the SIMD main loop in caculate_variance
+    //    (which loads 16-float vectors only while col_idx <= cur_col - 16) can never
+    //    read past cur_col; the scalar residual loop covers [0, cur_col) exactly.
+    int average_col = (matrix_col + spe_num - 1) / spe_num;
+    average_col = MAX((average_col + 15) / 16 * 16, 16);
     int average_row = MIN(matrix_row, row_per_loop);
     average_col = MIN(average_col, col_per_loop);
 
@@ -169,7 +179,17 @@ __global__ void teco_slave_reduce_variance_axis_left_float(ReduceVarianceArgs ar
                          stride_handle);
             memcpy_wait(stride_handle);
             aligned_col = cur_col;
-            // xbuf data alignment
+            // xbuf data alignment (residual/unaligned column path).
+            // [c44-rv] The last SPE's cur_col = matrix_col - _col may be < 16 and not a
+            // multiple of 16 (average_col is 16-aligned but the tail is not). In that
+            // case each row is repacked from stride cur_col to stride col_per_loop:
+            //  - both source (idx * cur_col) and destination (idx * col_per_loop) stay
+            //    inside xbuf, which is row_per_loop * col_per_loop floats, because
+            //    cur_row <= row_per_loop and cur_col <= col_per_loop;
+            //  - only [idx*col_per_loop, idx*col_per_loop + cur_col) is written, so the
+            //    padded tail [cur_col, col_per_loop) is never read by the kernels below
+            //    (SIMD loop needs col_idx + 16 <= cur_col; scalar loop stops at cur_col).
+            //    No out-of-bounds access after rounding.
             if (aligned_col % 16 != 0) {
                 for (int idx = cur_row - 1; idx >= 0; --idx) {
                     memcpy(tmpbuf, xbuf + idx * cur_col, cur_col * sizeof(float));
